@@ -1,0 +1,41 @@
+{
+  "name": "cf-slack-support-monorepo",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Composable Cloudflare Durable Objects + Slack customer support monorepo",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:workers": "npm run test:workers -w @cf-slack-support/integration-tests",
+    "test:coverage": "vitest run --coverage"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.8.71",
+    "@cloudflare/workers-types": "4.20250906.0",
+    "@types/node": "22.15.30",
+    "fast-check": "4.1.1",
+    "hono": "4.12.30",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4",
+    "wrangler": "4.35.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skyaara/cf-slack-support.git"
+  },
+  "homepage": "https://github.com/skyaara/cf-slack-support#readme",
+  "bugs": {
+    "url": "https://github.com/skyaara/cf-slack-support/issues"
+  }
+}

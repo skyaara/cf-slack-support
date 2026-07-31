@@ -1,0 +1,70 @@
+{
+  "name": "cf-slack-support",
+  "version": "0.0.1",
+  "description": "Composable Cloudflare Durable Objects + Slack customer support facade",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./client": {
+      "types": "./src/client.ts",
+      "default": "./src/client.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "manifest.slack.yaml",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@cf-slack-support/auth": "0.0.1",
+    "@cf-slack-support/channel-index": "0.0.1",
+    "@cf-slack-support/client": "0.0.1",
+    "@cf-slack-support/core": "0.0.1",
+    "@cf-slack-support/media": "0.0.1",
+    "@cf-slack-support/protocol": "0.0.1",
+    "@cf-slack-support/slack": "0.0.1"
+  },
+  "peerDependencies": {
+    "@cf-slack-support/lifecycle": "0.0.1",
+    "@cf-slack-support/reactions": "0.0.1",
+    "hono": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@cf-slack-support/lifecycle": {
+      "optional": true
+    },
+    "@cf-slack-support/reactions": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "cloudflare",
+    "durable-objects",
+    "slack",
+    "support",
+    "websocket"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/skyaara/cf-slack-support.git"
+  },
+  "homepage": "https://github.com/skyaara/cf-slack-support#readme",
+  "bugs": {
+    "url": "https://github.com/skyaara/cf-slack-support/issues"
+  }
+}

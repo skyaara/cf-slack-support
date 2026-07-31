@@ -1,0 +1,15 @@
+{
+  "name": "@cf-slack-support/integration-tests",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "test:workers": "vitest run --config vitest.workers.config.ts"
+  },
+  "dependencies": {
+    "@cf-slack-support/lifecycle": "0.0.1",
+    "@cf-slack-support/reactions": "0.0.1",
+    "cf-slack-support": "0.0.1",
+    "hono": "4.12.30"
+  }
+}

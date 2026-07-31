@@ -1,0 +1,36 @@
+{
+  "name": "cf-slack-support-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "SUPPORT_CHANNEL_PREFIX": "support",
+    "SUPPORT_CORS_ORIGINS": "*"
+  },
+  "r2_buckets": [
+    {
+      "binding": "SUPPORT_BUCKET",
+      "bucket_name": "my-support"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "SUPPORT_INDEX",
+      "id": "replace-me"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CUSTOMER_SUPPORT",
+        "class_name": "CustomerSupportDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CustomerSupportDO"]
+    }
+  ]
+}

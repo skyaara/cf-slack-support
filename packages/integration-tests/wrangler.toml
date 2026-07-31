@@ -1,0 +1,19 @@
+name = "cf-slack-support-integration"
+main = "src/worker.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[r2_buckets]]
+binding = "SUPPORT_BUCKET"
+bucket_name = "support-test"
+
+[[kv_namespaces]]
+binding = "SUPPORT_INDEX"
+id = "00000000000000000000000000000000"
+
+[durable_objects]
+bindings = [{ name = "CUSTOMER_SUPPORT", class_name = "CustomerSupportDO" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CustomerSupportDO"]
