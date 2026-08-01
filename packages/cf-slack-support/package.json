@@ -1,7 +1,7 @@
 {
   "name": "cf-slack-support",
   "version": "0.0.1",
-  "description": "Composable Cloudflare Durable Objects + Slack customer support facade",
+  "description": "Cloudflare Durable Objects + Slack customer support bridge with optional feature plugins",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
@@ -12,8 +12,40 @@
       "default": "./src/index.ts"
     },
     "./client": {
-      "types": "./src/client.ts",
-      "default": "./src/client.ts"
+      "types": "./src/client/index.ts",
+      "default": "./src/client/index.ts"
+    },
+    "./auth": {
+      "types": "./src/auth/index.ts",
+      "default": "./src/auth/index.ts"
+    },
+    "./media": {
+      "types": "./src/media/index.ts",
+      "default": "./src/media/index.ts"
+    },
+    "./channel-index": {
+      "types": "./src/channel-index/index.ts",
+      "default": "./src/channel-index/index.ts"
+    },
+    "./slack": {
+      "types": "./src/slack/index.ts",
+      "default": "./src/slack/index.ts"
+    },
+    "./emoji": {
+      "types": "./src/emoji/index.ts",
+      "default": "./src/emoji/index.ts"
+    },
+    "./protocol": {
+      "types": "./src/protocol/index.ts",
+      "default": "./src/protocol/index.ts"
+    },
+    "./features/reactions": {
+      "types": "./src/features/reactions/index.ts",
+      "default": "./src/features/reactions/index.ts"
+    },
+    "./features/lifecycle": {
+      "types": "./src/features/lifecycle/index.ts",
+      "default": "./src/features/lifecycle/index.ts"
     },
     "./package.json": "./package.json"
   },
@@ -27,27 +59,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
-  "dependencies": {
-    "@cf-slack-support/auth": "0.0.1",
-    "@cf-slack-support/channel-index": "0.0.1",
-    "@cf-slack-support/client": "0.0.1",
-    "@cf-slack-support/core": "0.0.1",
-    "@cf-slack-support/media": "0.0.1",
-    "@cf-slack-support/protocol": "0.0.1",
-    "@cf-slack-support/slack": "0.0.1"
-  },
   "peerDependencies": {
-    "@cf-slack-support/lifecycle": "0.0.1",
-    "@cf-slack-support/reactions": "0.0.1",
     "hono": "^4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@cf-slack-support/lifecycle": {
-      "optional": true
-    },
-    "@cf-slack-support/reactions": {
-      "optional": true
-    }
   },
   "keywords": [
     "cloudflare",

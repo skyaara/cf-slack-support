@@ -4,5 +4,11 @@
     "noEmit": true,
     "types": ["@cloudflare/workers-types", "node", "vitest/globals"]
   },
-  "include": ["packages/*/src/**/*.ts", "packages/*/tests/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "packages/cf-slack-support/src/**/*.ts",
+    "packages/cf-slack-support/tests/**/*.ts",
+    "packages/integration-tests/src/**/*.ts",
+    "packages/integration-tests/tests/**/*.ts",
+    "vitest.config.ts"
+  ]
 }

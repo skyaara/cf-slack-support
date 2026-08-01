@@ -2,10 +2,11 @@
 
 ## 0.0.1
 
-Initial monorepo scaffold (not yet published to npm).
-
-- Feature packages: protocol, core, slack, emoji, media, auth, channel-index, client
-- Optional peer features: reactions, lifecycle
-- Facade package: `cf-slack-support`
-- Vitest + fast-check + Cloudflare vitest-pool-workers tests
+- Single publishable package: `cf-slack-support`
+- Optional features as **subpath plugins** (not peer packages):
+  - `cf-slack-support/features/reactions`
+  - `cf-slack-support/features/lifecycle`
+- Bundle-conscious entries: `./client`, `./emoji`, `./protocol`, …
+- Channel policies: `threads_only` | `bidirectional` | `staff_main_customer_threads`
+- Vitest + fast-check + Cloudflare vitest-pool-workers DO tests
 - Example Worker wiring

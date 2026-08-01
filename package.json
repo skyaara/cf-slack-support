@@ -2,11 +2,12 @@
   "name": "cf-slack-support-monorepo",
   "private": true,
   "version": "0.0.1",
-  "description": "Composable Cloudflare Durable Objects + Slack customer support monorepo",
+  "description": "Cloudflare Durable Objects + Slack customer support (single publishable package)",
   "license": "MIT",
   "type": "module",
   "workspaces": [
-    "packages/*",
+    "packages/cf-slack-support",
+    "packages/integration-tests",
     "examples/*"
   ],
   "scripts": {
@@ -15,12 +16,17 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:workers": "npm run test:workers -w @cf-slack-support/integration-tests",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage:unit": "vitest run --coverage",
+    "test:coverage:workers": "npm run test:coverage -w @cf-slack-support/integration-tests",
+    "test:coverage": "npm run test:coverage:unit && npm run test:coverage:workers"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.8.71",
+    "@cloudflare/vitest-pool-workers": "^0.8.71",
     "@cloudflare/workers-types": "4.20250906.0",
     "@types/node": "22.15.30",
+    "@vitest/coverage-istanbul": "3.2.4",
+    "@vitest/runner": "^3.2.4",
+    "@vitest/snapshot": "^3.2.4",
     "fast-check": "4.1.1",
     "hono": "4.12.30",
     "typescript": "5.9.3",

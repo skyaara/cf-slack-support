@@ -1,12 +1,22 @@
 /**
- * Facade package: re-exports core + common helpers.
+ * Worker entry for `cf-slack-support`.
  *
- * Optional features are peer dependencies — install and pass them explicitly:
+ * Keep this surface **lean for Worker bundle size**:
+ * - Core DO + HTTP wiring + common Worker helpers live here
+ * - Browser client: `cf-slack-support/client`
+ * - Optional plugins: `cf-slack-support/features/reactions`, `.../lifecycle`
+ * - Rare/advanced: `cf-slack-support/protocol`, `.../emoji`, `.../slack`, …
  *
  * ```ts
- * import { defineSlackSupport } from 'cf-slack-support';
- * import { reactionsFeature } from '@cf-slack-support/reactions';
- * import { lifecycleFeature } from '@cf-slack-support/lifecycle';
+ * import {
+ *   defineSlackSupport,
+ *   createBearerTokenAuthenticator,
+ *   createKvChannelIndex,
+ *   createR2MediaStore,
+ *   CHANNEL_POLICY_PRESETS,
+ * } from 'cf-slack-support';
+ * import { reactionsFeature } from 'cf-slack-support/features/reactions';
+ * import { lifecycleFeature } from 'cf-slack-support/features/lifecycle';
  *
  * defineSlackSupport({
  *   features: [reactionsFeature(), lifecycleFeature()],
@@ -15,10 +25,12 @@
  * ```
  */
 
+// ── Protocol: domain types + channel policy (small; needed for wiring) ─
 export type {
   AuthenticateFn,
   ChannelCreatedContext,
   ChannelIndex,
+  CustomerSupportNamespace,
   DefaultRoutes,
   MediaConfig,
   MediaObject,
@@ -38,7 +50,14 @@ export type {
   ClientFrame,
   ServerFrame,
   UploadResponse,
-} from '@cf-slack-support/protocol';
+  ChannelPolicy,
+  ChannelPolicyInput,
+  ChannelPolicyMode,
+  ChannelPolicyPresetName,
+  InboundStaffDropReason,
+  InboundStaffMessageDecision,
+  InboundStaffMessageRef,
+} from './protocol';
 
 export {
   DEFAULT_ALLOWED_MIME_TYPES,
@@ -46,39 +65,70 @@ export {
   DEFAULT_ROUTES,
   parseClientFrame,
   parseServerFrame,
-} from '@cf-slack-support/protocol';
+  isClientFrameType,
+  isServerFrameType,
+  CHANNEL_POLICY_PRESETS,
+  DEFAULT_CHANNEL_POLICY,
+  decideInboundStaffMessage,
+  describeChannelPolicy,
+  resolveChannelPolicy,
+} from './protocol';
 
-export { createKvChannelIndex, createMemoryChannelIndex } from '@cf-slack-support/channel-index';
-export { createR2MediaStore, mediaKeyFromPath, createMemoryMediaStore } from '@cf-slack-support/media';
-export type { R2MediaStoreOptions } from '@cf-slack-support/media';
+// ── Worker helpers (opt-in via import; tree-shake unused) ───────────────
+export { createKvChannelIndex, createMemoryChannelIndex } from './channel-index';
 
-export { verifySlackSignature, createSlackClient, slugifyChannelName } from '@cf-slack-support/slack';
-export type { SlackClient } from '@cf-slack-support/slack';
+export { createR2MediaStore, mediaKeyFromPath, createMemoryMediaStore } from './media';
+export type { R2MediaStoreOptions } from './media';
+
+export { verifySlackSignature, createSlackClient, slugifyChannelName } from './slack';
+export type {
+  SlackClient,
+  SlackApiError,
+  SlackChannel,
+  SlackPostMessageResult,
+  SlackUploadExternalResult,
+} from './slack';
 
 export {
   createBearerTokenAuthenticator,
   mintSupportBearerToken,
-} from '@cf-slack-support/auth';
-export type { BearerTokenAuthOptions } from '@cf-slack-support/auth';
+} from './auth';
+export type { BearerTokenAuthOptions } from './auth';
 
+// ── Core: DO + define + feature plugin types ───────────────────────────
 export {
   defineSlackSupport,
   createCustomerSupportDOClass,
-} from '@cf-slack-support/core';
+  applyCoreSchema,
+  buildBlocks,
+  clientSafeError,
+  extensionForMime,
+  extensionForMimeOrBin,
+  isMissingChannelError,
+  jsonAttachments,
+  jsonReactions,
+  newId,
+  parseAttachments,
+  parseReactions,
+  titleFromFirstMessage,
+} from './core';
 export type {
   SlackSupportApp,
   SlackSupportHonoEnv,
   SlackSupportOptions,
   SupportFeature,
   FeatureHost,
+  FeatureHandle,
+  FeatureSql,
+  HttpFeatureContext,
+  ConversationRow,
+  MessageRow,
   CustomerSupportDOClass,
   CustomerSupportDOConstructor,
-} from '@cf-slack-support/core';
+} from './core';
 
-export { createSupportClient } from '@cf-slack-support/client';
-export type {
-  CreateSupportClientOptions,
-  SupportClient,
-  SupportClientEvents,
-  SupportClientStatus,
-} from '@cf-slack-support/client';
+// Intentionally NOT re-exported from main (import via subpaths):
+// - createSupportClient → 'cf-slack-support/client'
+// - reactionsFeature    → 'cf-slack-support/features/reactions'
+// - lifecycleFeature    → 'cf-slack-support/features/lifecycle'
+// - emoji map           → 'cf-slack-support/emoji'
