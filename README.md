@@ -3,35 +3,30 @@
 [![npm version](https://img.shields.io/badge/npm-0.0.1-blue.svg)](https://www.npmjs.com/package/cf-slack-support)
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 
-Composable **Cloudflare Durable Objects + Slack** customer support bridge, split into feature packages.
+**Cloudflare Durable Objects + Slack** customer support bridge.
 
-**Status:** `0.0.1` (initial monorepo version; not published to npm yet).  
+**Status:** `0.0.1` (not published to npm yet).  
 **Repo:** https://github.com/skyaara/cf-slack-support
 
-Synced with Flickks (`@flickks/slack-support`) capabilities: per-customer channels, thread conversations, hibernatable WebSockets, media uploads, **reactions**, and **close lifecycle**.
+One install. Optional features are **subpath plugins** (tree-shake / leave out of the bundle), not a zoo of `@cf-slack-support/*` packages.
 
-## Monorepo packages
+## Install
 
-| Package | Role |
-|---------|------|
-| `cf-slack-support` | Facade re-exports (Worker entry convenience) |
-| `@cf-slack-support/protocol` | Domain types + WS frames |
-| `@cf-slack-support/core` | DO host, Hono `defineSlackSupport`, **feature plugin API** |
-| `@cf-slack-support/slack` | Slack Web API + signature verify |
-| `@cf-slack-support/emoji` | Standard Slack reaction → Unicode map |
-| `@cf-slack-support/media` | `MediaStore` + R2 / memory |
-| `@cf-slack-support/auth` | HMAC bearer mint/verify |
-| `@cf-slack-support/channel-index` | channelId → customerKey (KV / memory) |
-| `@cf-slack-support/client` | Browser client |
-| `@cf-slack-support/reactions` | **Optional peer feature** — Slack reactions |
-| `@cf-slack-support/lifecycle` | **Optional peer feature** — close / reopen |
-
-Optional features are **peer dependencies you install and pass in**:
+```bash
+npm install cf-slack-support hono
+```
 
 ```ts
-import { defineSlackSupport, createBearerTokenAuthenticator, /* … */ } from 'cf-slack-support';
-import { reactionsFeature } from '@cf-slack-support/reactions';
-import { lifecycleFeature } from '@cf-slack-support/lifecycle';
+import {
+  defineSlackSupport,
+  createBearerTokenAuthenticator,
+  createKvChannelIndex,
+  createR2MediaStore,
+  CHANNEL_POLICY_PRESETS,
+} from 'cf-slack-support';
+// Optional plugins — import only what you enable:
+import { reactionsFeature } from 'cf-slack-support/features/reactions';
+import { lifecycleFeature } from 'cf-slack-support/features/lifecycle';
 
 const support = defineSlackSupport({
   features: [reactionsFeature(), lifecycleFeature()],
@@ -43,41 +38,93 @@ export const CustomerSupportDO = support.CustomerSupportDO;
 export default { fetch: support.fetch }; // prefer fetch over app for WebSockets
 ```
 
-Without `lifecycle`, `close_conversation` / `reopen_conversation` frames return `feature_not_enabled`.  
-Without `reactions`, reaction events are ignored and `message.reactions` is omitted.
+Without `lifecycleFeature`, `close_conversation` / `reopen_conversation` frames return `feature_not_enabled`.  
+Without `reactionsFeature`, reaction events are ignored and `message.reactions` is omitted.
 
-See [`examples/worker`](./examples/worker) for a full Flickks-style wiring.
-
-## Install (published layout)
-
-```bash
-npm install cf-slack-support hono
-# optional features:
-npm install @cf-slack-support/reactions @cf-slack-support/lifecycle
-```
-
-Browser:
+### Browser client (separate entry — keeps DO/Slack out of the UI bundle)
 
 ```ts
 import { createSupportClient } from 'cf-slack-support/client';
-// or: '@cf-slack-support/client'
 ```
+
+### Subpath map (bundle-conscious)
+
+| Import | When to use |
+|--------|-------------|
+| `cf-slack-support` | Worker: `defineSlackSupport`, runtime helpers, types |
+| `cf-slack-support/client` | Browser WebSocket client only |
+| `cf-slack-support/features/reactions` | Slack reaction sync + emoji map |
+| `cf-slack-support/features/lifecycle` | Close / reopen conversations |
+| `cf-slack-support/auth` | Bearer mint/verify (also on main) |
+| `cf-slack-support/media` | R2 / memory stores (also on main) |
+| `cf-slack-support/channel-index` | KV / memory channel index (also on main) |
+| `cf-slack-support/slack` | Low-level Slack client / signature verify |
+| `cf-slack-support/protocol` | Frames & domain types only |
+| `cf-slack-support/emoji` | Emoji map without the reactions feature |
+
+`sideEffects: false` — unused subpaths stay out of esbuild/Wrangler trees.
+
+### Channel policy (staff root vs threads)
+
+```ts
+import { CHANNEL_POLICY_PRESETS, type ChannelPolicy } from 'cf-slack-support';
+
+getRuntime: (env) => ({
+  channelPolicy: CHANNEL_POLICY_PRESETS.threadsOnly,
+  // or: 'bidirectional' | CHANNEL_POLICY_PRESETS.staffMainCustomerThreads
+});
+```
+
+| Policy | Channel root | Thread |
+|--------|--------------|--------|
+| `threads_only` | Dropped (staff must reply in-thread) | → customer |
+| `bidirectional` (default) | Starts a new customer conversation | → customer |
+| `staff_main_customer_threads` | Staff-only (not shown to customer) | → customer |
+
+Pure helper: `decideInboundStaffMessage(policy, { ts, thread_ts })`.  
+Optional per-customer override: `identity.meta.channelPolicy`.
+
+See [`examples/worker`](./examples/worker) for full wiring.
+
+## Repo layout
+
+```
+packages/
+  cf-slack-support/     # only published package (src modules + features/)
+  integration-tests/    # workerd / DO tests (private)
+examples/worker/
+```
+
+Internal folders (`src/features/…`, `src/protocol/…`) are for modularity — not separate npm packages.
 
 ## Develop
 
 ```bash
 npm install
-npm test                 # unit + property (fast-check) tests
-npm run test:workers     # miniflare / vitest-pool-workers integration
+npm test                 # unit + property (fast-check)
+npm run test:workers     # miniflare / vitest-pool-workers
 npm run typecheck
 ```
 
+### Contributing / protected `main`
+
+- **Do not push commits to `main`.** Branch from `main`, open a PR, merge via review.
+- CI and reviews land on PRs; `main` stays releasable.
+
 ## Testing stack
 
-- **Vitest** — unit tests per package  
-- **fast-check** — property / fuzzy tests (protocol, emoji, signatures, auth, parsers)  
-- **@cloudflare/vitest-pool-workers** — Worker + DO integration (`packages/integration-tests`)  
-- Mocks for Slack `fetch`, in-memory media store, in-memory channel index  
+- **Vitest** — unit tests  
+- **fast-check** — property tests  
+- **@cloudflare/vitest-pool-workers** — Worker + DO integration  
+- **Coverage (Istanbul)** — unit + workers  
+
+```bash
+npm test
+npm run test:workers
+npm run test:coverage
+```
+
+**Why workers coverage is not V8 by default:** Cloudflare’s Vitest pool runs in **workerd**, which does not expose the V8 coverage profiler. See [Cloudflare known issues → Coverage](https://developers.cloudflare.com/workers/testing/vitest-integration/known-issues/#coverage).
 
 ## Slack app
 

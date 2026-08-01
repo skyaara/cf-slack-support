@@ -1,13 +1,16 @@
 import {
+  CHANNEL_POLICY_PRESETS,
   createBearerTokenAuthenticator,
   createKvChannelIndex,
   createR2MediaStore,
   defineSlackSupport,
+  resolveChannelPolicy,
   slugifyChannelName,
+  type ChannelPolicyInput,
+  type CustomerSupportDOConstructor,
 } from 'cf-slack-support';
-import type { CustomerSupportDOConstructor } from 'cf-slack-support';
-import { reactionsFeature } from '@cf-slack-support/reactions';
-import { lifecycleFeature } from '@cf-slack-support/lifecycle';
+import { reactionsFeature } from 'cf-slack-support/features/reactions';
+import { lifecycleFeature } from 'cf-slack-support/features/lifecycle';
 
 export type Env = {
   SUPPORT_BUCKET: R2Bucket;
@@ -21,6 +24,13 @@ export type Env = {
   SLACK_BOT_TOKEN: string;
   SLACK_SIGNING_SECRET: string;
   SLACK_BOT_USER_ID?: string;
+  /**
+   * Channel routing policy:
+   * - `threads_only` — staff must reply in threads
+   * - `bidirectional` — top-level staff posts start a customer conversation (default)
+   * - `staff_main_customer_threads` — channel root staff-only; threads = customer chats
+   */
+  SUPPORT_CHANNEL_POLICY?: string;
 };
 
 function parseList(value: string | undefined): string[] {
@@ -40,6 +50,12 @@ function parseCors(value: string | undefined): string[] | '*' {
  * Full-featured example matching Flickks wiring:
  * core + reactions + lifecycle + R2 media.
  */
+function channelPolicyFromEnv(env: Env): ChannelPolicyInput {
+  const raw = env.SUPPORT_CHANNEL_POLICY?.trim();
+  if (!raw) return CHANNEL_POLICY_PRESETS.bidirectional;
+  return resolveChannelPolicy(raw as ChannelPolicyInput);
+}
+
 const support = defineSlackSupport<Env>({
   features: [reactionsFeature(), lifecycleFeature()],
   authenticate: createBearerTokenAuthenticator({
@@ -70,6 +86,7 @@ const support = defineSlackSupport<Env>({
         slugifyChannelName(`${prefix}-${identity.customerKey}`),
       corsOrigins: parseCors(env.SUPPORT_CORS_ORIGINS),
       staffDisplayNameFallback: 'Support',
+      channelPolicy: channelPolicyFromEnv(env),
     };
   },
 });

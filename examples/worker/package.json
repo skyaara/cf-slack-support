@@ -7,8 +7,6 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@cf-slack-support/lifecycle": "0.0.1",
-    "@cf-slack-support/reactions": "0.0.1",
     "cf-slack-support": "0.0.1",
     "hono": "4.12.30"
   },

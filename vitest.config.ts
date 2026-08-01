@@ -1,5 +1,11 @@
 import { defineConfig } from 'vitest/config';
 
+/**
+ * Node unit / property tests (fast-check, pure helpers).
+ *
+ * Workers/DO tests live under packages/integration-tests and use a separate
+ * vitest-pool-workers config — workerd cannot use V8 coverage; those use Istanbul.
+ */
 export default defineConfig({
   resolve: {
     alias: {
@@ -10,7 +16,7 @@ export default defineConfig({
   },
   test: {
     globals: false,
-    include: ['packages/*/tests/**/*.test.ts'],
+    include: ['packages/cf-slack-support/tests/**/*.test.ts'],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',
@@ -20,6 +26,20 @@ export default defineConfig({
     environment: 'node',
     testTimeout: 30_000,
     pool: 'forks',
+    coverage: {
+      // Istanbul so unit + workers reports use the same provider and can be compared.
+      provider: 'istanbul',
+      reportsDirectory: './coverage/unit',
+      reporter: ['text', 'json', 'html', 'lcov'],
+      include: ['packages/cf-slack-support/src/**/*.{ts,js}'],
+      exclude: [
+        '**/*.test.ts',
+        '**/tests/**',
+        '**/node_modules/**',
+        '**/dist/**',
+        'packages/integration-tests/**',
+        '**/test/stubs/**',
+      ],
+    },
   },
 });
-

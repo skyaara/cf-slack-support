@@ -1,12 +1,16 @@
 import {
+  CHANNEL_POLICY_PRESETS,
   createBearerTokenAuthenticator,
   createKvChannelIndex,
   createR2MediaStore,
   defineSlackSupport,
+  resolveChannelPolicy,
   slugifyChannelName,
+  type ChannelPolicyInput,
+  type CustomerSupportDOConstructor,
 } from 'cf-slack-support';
-import { reactionsFeature } from '@cf-slack-support/reactions';
-import { lifecycleFeature } from '@cf-slack-support/lifecycle';
+import { reactionsFeature } from 'cf-slack-support/features/reactions';
+import { lifecycleFeature } from 'cf-slack-support/features/lifecycle';
 
 export type Env = {
   SUPPORT_BUCKET: R2Bucket;
@@ -16,7 +20,18 @@ export type Env = {
   SUPPORT_AUTH_SECRET: string;
   SLACK_BOT_TOKEN: string;
   SLACK_SIGNING_SECRET: string;
+  /**
+   * `threads_only` | `bidirectional` | `staff_main_customer_threads`
+   * @default bidirectional
+   */
+  SUPPORT_CHANNEL_POLICY?: string;
 };
+
+function policyFromEnv(env: Env): ChannelPolicyInput {
+  const raw = env.SUPPORT_CHANNEL_POLICY?.trim();
+  if (!raw) return CHANNEL_POLICY_PRESETS.bidirectional;
+  return resolveChannelPolicy(raw as ChannelPolicyInput);
+}
 
 const support = defineSlackSupport<Env>({
   features: [reactionsFeature(), lifecycleFeature()],
@@ -41,8 +56,9 @@ const support = defineSlackSupport<Env>({
     channelIsPrivate: true,
     channelName: (id) => slugifyChannelName(`support-${id.customerKey}`),
     corsOrigins: '*',
+    channelPolicy: policyFromEnv(env),
   }),
 });
 
-export const CustomerSupportDO = support.CustomerSupportDO;
+export const CustomerSupportDO: CustomerSupportDOConstructor<Env> = support.CustomerSupportDO;
 export default { fetch: support.fetch };
