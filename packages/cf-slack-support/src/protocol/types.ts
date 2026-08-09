@@ -1,4 +1,8 @@
 import type { ChannelPolicyInput } from './channel-policy';
+import type {
+  ConversationExternalBinding,
+  MessageExternalRef,
+} from './external-binding';
 
 /** Authenticated customer identity returned by your `authenticate` hook. */
 export type SupportIdentity = {
@@ -30,7 +34,8 @@ export type SupportAttachment = {
   height?: number;
 };
 
-export type SupportAuthorRole = 'customer' | 'staff' | 'system';
+/** Who authored a support message — humans, agents, or system notices. */
+export type SupportAuthorRole = 'customer' | 'staff' | 'agent' | 'system';
 
 /**
  * Aggregated reaction on a support message (Slack → customer, one-way).
@@ -54,17 +59,35 @@ export type SupportMessage = {
   authorName?: string;
   createdAt: number;
   clientId?: string;
+  /**
+   * Opaque platform message id for the channel adapter that carried this message.
+   * Prefer this over {@link slackTs}.
+   */
+  external?: MessageExternalRef | null;
+  /**
+   * Slack message `ts` when mirrored via the Slack adapter.
+   * @deprecated Prefer `external` (`adapterId: 'slack'`). Still populated for compat.
+   */
   slackTs?: string;
   /** Populated by the reactions feature. */
   reactions?: SupportReaction[];
 };
 
-/** Lifecycle of a support request (one Slack thread). Requires lifecycle feature. */
+/** Lifecycle of a support request (one conversation). Requires lifecycle feature. */
 export type SupportConversationStatus = 'open' | 'closed';
 
 export type SupportConversation = {
   id: string;
   title: string | null;
+  /**
+   * Where this conversation lives on an external channel (Slack thread, agent
+   * session, Discord channel, …). Null until the first successful egress bind.
+   */
+  external?: ConversationExternalBinding | null;
+  /**
+   * Slack thread root `ts` when bound to Slack.
+   * @deprecated Prefer `external`. Still populated for compat / existing clients.
+   */
   slackThreadTs: string | null;
   /** Defaults to `open` when lifecycle feature is absent or for legacy rows. */
   status: SupportConversationStatus;
@@ -85,7 +108,13 @@ export type MessageHookContext = {
   customerKey: string;
   message: SupportMessage;
   conversation: SupportConversation;
-  direction: 'to_slack' | 'from_slack';
+  /**
+   * `to_slack` / `from_slack` kept for existing hooks.
+   * Newer code should also read {@link adapterId}.
+   */
+  direction: 'to_slack' | 'from_slack' | 'to_external' | 'from_external';
+  /** Channel adapter that carried this message (`slack`, `agent`, …). */
+  adapterId?: string;
 };
 
 export type ChannelIndex = {
@@ -138,6 +167,11 @@ export type MediaConfig = {
   publicBaseUrl: string;
   maxImageBytes?: number;
   allowedMimeTypes?: string[];
+  /**
+   * Allow unauthenticated reads from the media route. Disabled by default.
+   * Prefer authenticated reads and native Slack uploads for support content.
+   */
+  publicRead?: boolean;
 };
 
 export type ResolvedMediaConfig = Required<
@@ -158,6 +192,15 @@ export type SlackSupportRuntime = {
   channelIndex: ChannelIndex;
   customers: CustomerSupportNamespace;
   staffUserIds: string[];
+  /**
+   * Optional staff authorization hook. When omitted, only IDs in
+   * `staffUserIds` may send messages or reactions to customers.
+   */
+  authorizeSlackActor?: (input: {
+    userId: string;
+    channelId: string;
+    eventType: string;
+  }) => boolean | Promise<boolean>;
   channelIsPrivate: boolean;
   channelName: (identity: SupportIdentity) => string;
   corsOrigins: string[] | '*';

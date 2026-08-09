@@ -60,6 +60,7 @@ import { createSupportClient } from 'cf-slack-support/client';
 | `cf-slack-support/channel-index` | KV / memory channel index (also on main) |
 | `cf-slack-support/slack` | Low-level Slack client / signature verify |
 | `cf-slack-support/protocol` | Frames & domain types only |
+| `cf-slack-support/channel` | Channel adapter contract (Slack / agent / non-threaded topologies) |
 | `cf-slack-support/emoji` | Emoji map without the reactions feature |
 
 `sideEffects: false` — unused subpaths stay out of esbuild/Wrangler trees.
@@ -85,6 +86,24 @@ Pure helper: `decideInboundStaffMessage(policy, { ts, thread_ts })`.
 Optional per-customer override: `identity.meta.channelPolicy`.
 
 See [`examples/worker`](./examples/worker) for full wiring.
+
+## Security defaults
+
+- Set `staffUserIds` to every Slack user allowed to communicate with customers. Other
+  channel members are ignored. For directory/group-backed authorization, provide
+  `authorizeSlackActor`.
+- Set `corsOrigins` to the exact browser origins that may open the support client.
+  WebSocket upgrades validate the browser `Origin`; avoid `'*'` in production.
+- The built-in bearer helper requires a secret of at least 32 non-whitespace
+  characters and mints five-minute tokens by default. Browser WebSocket credentials
+  are carried in an encoded subprotocol, never in the URL.
+- Media reads are authenticated by default and scoped to the authenticated
+  `customerKey`. Render protected images by fetching them through
+  `client.downloadAttachment()` and creating a local object URL. Set
+  `media.publicRead: true` only when the deployment intentionally accepts public,
+  capability-URL access.
+- Default uploads are limited to 8 MiB, at most 10 attachments per message, and
+  JPEG/PNG/WebP/GIF content with matching image signatures.
 
 ## Repo layout
 

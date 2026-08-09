@@ -1,7 +1,9 @@
 import type { Hono } from 'hono';
 import type {
   ClientFrame,
+  ConversationExternalBinding,
   MediaConfig,
+  MessageExternalRef,
   SlackSupportRuntime,
   SupportConversation,
   SupportIdentity,
@@ -25,6 +27,9 @@ export type ConversationRow = {
   closed_at: number | null;
   created_at: number;
   updated_at: number;
+  external_adapter_id?: string | null;
+  external_inbox_id?: string | null;
+  external_location_id?: string | null;
 };
 
 export type MessageRow = {
@@ -38,9 +43,25 @@ export type MessageRow = {
   client_id: string | null;
   slack_ts: string | null;
   reactions_json?: string | null;
+  external_adapter_id?: string | null;
+  external_message_id?: string | null;
 };
 
 export type FeatureHandle = 'handled' | 'pass';
+
+export type InsertConversationInput = {
+  id: string;
+  title: string | null;
+  /** Prefer this over `slackThreadTs`. */
+  external?: ConversationExternalBinding | null;
+  /**
+   * @deprecated Prefer `external`. Still accepted; mirrored into Slack binding.
+   */
+  slackThreadTs?: string | null;
+  createdAt: number;
+  status?: SupportConversation['status'];
+  closedAt?: number | null;
+};
 
 /**
  * Runtime API exposed to feature packages from inside the Durable Object.
@@ -57,15 +78,13 @@ export type FeatureHost = {
   identityFromMeta(): SupportIdentity;
   listConversations(): SupportConversation[];
   getConversation(id: string): SupportConversation | null;
+  /** @deprecated Prefer {@link getConversationByBinding}. */
   getConversationByThread(threadTs: string): SupportConversation | null;
-  insertConversation(input: {
-    id: string;
-    title: string | null;
-    slackThreadTs: string | null;
-    createdAt: number;
-    status?: SupportConversation['status'];
-    closedAt?: number | null;
-  }): SupportConversation;
+  getConversationByBinding(
+    binding: Pick<ConversationExternalBinding, 'adapterId' | 'locationId'>,
+  ): SupportConversation | null;
+  insertConversation(input: InsertConversationInput): SupportConversation;
+  bindConversation(conversationId: string, binding: ConversationExternalBinding): void;
   setConversationStatus(
     id: string,
     status: SupportConversation['status'],
@@ -73,12 +92,18 @@ export type FeatureHost = {
   ): SupportConversation | null;
   insertMessage(message: SupportMessage): SupportMessage;
   findByClientId(clientId: string): SupportMessage | null;
+  /** @deprecated Prefer {@link findMessageByExternalRef}. */
   findBySlackTs(slackTs: string): SupportMessage | null;
+  findMessageByExternalRef(ref: MessageExternalRef): SupportMessage | null;
   messagesSince(lastSeenId: string | undefined, limit?: number): SupportMessage[];
   rowToMessage(row: MessageRow): SupportMessage;
   broadcast(frame: unknown, except?: WebSocket): void;
   send(ws: WebSocket, frame: unknown): void;
   ensureChannel(identity: SupportIdentity): Promise<{ channelId: string; created: boolean }>;
+  /**
+   * Post via the Slack channel adapter. Prefer this until multi-adapter
+   * routing lands on the host (`postToChannel`).
+   */
   postToSlack(input: {
     runtime: SlackSupportRuntime;
     channelId: string;

@@ -42,7 +42,8 @@ function parseList(value: string | undefined): string[] {
 }
 
 function parseCors(value: string | undefined): string[] | '*' {
-  if (!value || value.trim() === '*') return '*';
+  if (!value) return [];
+  if (value.trim() === '*') return '*';
   return parseList(value);
 }
 

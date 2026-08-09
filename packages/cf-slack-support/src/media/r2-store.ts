@@ -26,6 +26,22 @@ function joinUrl(base: string, ...parts: string[]): string {
   return path ? `${origin}/${path}` : origin;
 }
 
+function base64UrlEncode(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Opaque, unambiguous storage namespace for one authenticated customer. */
+export function mediaNamespaceForCustomer(customerKey: string): string {
+  return `customer_${base64UrlEncode(customerKey)}`;
+}
+
+export function mediaKeyBelongsToCustomer(key: string, customerKey: string): boolean {
+  return key.startsWith(`${mediaNamespaceForCustomer(customerKey)}/`);
+}
+
 /** R2-backed MediaStore with public URLs under your support CDN host. */
 export function createR2MediaStore(options: R2MediaStoreOptions): MediaStore {
   const urlPathPrefix = options.urlPathPrefix ?? '/media';

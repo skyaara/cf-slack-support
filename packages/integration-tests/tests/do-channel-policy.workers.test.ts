@@ -2,6 +2,7 @@ import { env, createExecutionContext, waitOnExecutionContext } from 'cloudflare:
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   mintSupportBearerToken,
+  mediaNamespaceForCustomer,
   type ChannelPolicyMode,
 } from 'cf-slack-support';
 import worker from '../src/worker';
@@ -12,6 +13,7 @@ type TestEnv = typeof env & {
   CUSTOMER_SUPPORT: DurableObjectNamespace;
   SUPPORT_INDEX: KVNamespace;
   SUPPORT_AUTH_SECRET: string;
+  SUPPORT_BUCKET: R2Bucket;
 };
 
 const testEnv = env as TestEnv;
@@ -22,6 +24,14 @@ async function authHeader(customerKey = 'user_1') {
     customerKey,
   });
   return `Bearer ${token}`;
+}
+
+function websocketAuthProtocol(token: string): string {
+  const bytes = new TextEncoder().encode(token);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `cf-slack-support.v1, cf-slack-support.auth.${encoded}`;
 }
 
 async function ensureCustomer(
@@ -100,6 +110,20 @@ describe('Durable Object + channelPolicy', () => {
     const list = await listConversations('user_bi');
     expect(list.conversations.length).toBe(1);
     expect(list.conversations[0]?.slackThreadTs).toBe('2000.0001');
+  });
+
+  it('drops Slack messages from users outside the staff allowlist', async () => {
+    await ensureCustomer('user_untrusted', slack.channelId, 'bidirectional');
+    const res = await postSlackEvent({
+      type: 'message',
+      channel: slack.channelId,
+      user: 'U_NOT_STAFF',
+      text: 'I am not support',
+      ts: '2000.0099',
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as object).toMatchObject({ ignored: 'unauthorized_actor' });
+    expect((await listConversations('user_untrusted')).conversations).toEqual([]);
   });
 
   it('threads_only: top-level staff message is dropped', async () => {
@@ -197,6 +221,138 @@ describe('Durable Object + channelPolicy', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { conversations: unknown[] };
     expect(Array.isArray(body.conversations)).toBe(true);
+  });
+
+  it('does not accept bearer credentials from HTTP query strings', async () => {
+    const token = (await authHeader('user_http_query')).replace(/^Bearer\s+/, '');
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request(`https://example.com/conversations?token=${encodeURIComponent(token)}`),
+      testEnv as never,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects cross-origin WebSocket upgrades', async () => {
+    const token = (await authHeader('user_ws_origin')).replace(/^Bearer\s+/, '');
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request('https://example.com/ws', {
+        headers: {
+          Upgrade: 'websocket',
+          Origin: 'https://evil.example',
+          'Sec-WebSocket-Protocol': websocketAuthProtocol(token),
+        },
+      }),
+      testEnv as never,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(403);
+  });
+
+  it('authenticates allowed WebSockets without putting the token in the URL', async () => {
+    const token = (await authHeader('user_ws_protocol')).replace(/^Bearer\s+/, '');
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(
+      new Request('https://example.com/ws', {
+        headers: {
+          Upgrade: 'websocket',
+          Origin: 'https://app.test',
+          'Sec-WebSocket-Protocol': websocketAuthProtocol(token),
+        },
+      }),
+      testEnv as never,
+      ctx,
+    );
+    await waitOnExecutionContext(ctx);
+    expect(res.status).toBe(101);
+    expect(res.headers.get('sec-websocket-protocol')).toBe('cf-slack-support.v1');
+    res.webSocket?.accept();
+    res.webSocket?.close(1000, 'test complete');
+  });
+
+  it('requires matching customer authentication for media reads', async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const mediaKey = `${mediaNamespaceForCustomer('user_media')}/a.png`;
+    await testEnv.SUPPORT_BUCKET.put(mediaKey, png, {
+      httpMetadata: { contentType: 'image/png' },
+    });
+
+    const unauthorizedContext = createExecutionContext();
+    const unauthorized = await worker.fetch(
+      new Request(`https://example.com/media/${mediaKey}`),
+      testEnv as never,
+      unauthorizedContext,
+    );
+    await waitOnExecutionContext(unauthorizedContext);
+    expect(unauthorized.status).toBe(401);
+
+    const wrongContext = createExecutionContext();
+    const wrongCustomer = await worker.fetch(
+      new Request(`https://example.com/media/${mediaKey}`, {
+        headers: { Authorization: await authHeader('someone_else') },
+      }),
+      testEnv as never,
+      wrongContext,
+    );
+    await waitOnExecutionContext(wrongContext);
+    expect(wrongCustomer.status).toBe(404);
+
+    const allowedContext = createExecutionContext();
+    const allowed = await worker.fetch(
+      new Request(`https://example.com/media/${mediaKey}`, {
+        headers: { Authorization: await authHeader('user_media') },
+      }),
+      testEnv as never,
+      allowedContext,
+    );
+    await waitOnExecutionContext(allowedContext);
+    expect(allowed.status).toBe(200);
+    expect(allowed.headers.get('cache-control')).toBe('private, no-store');
+    expect(allowed.headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('validates image signatures and stores uploads in isolated namespaces', async () => {
+    const validPng = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const validContext = createExecutionContext();
+    const valid = await worker.fetch(
+      new Request('https://example.com/uploads', {
+        method: 'POST',
+        headers: {
+          Authorization: await authHeader('a/b'),
+          'Content-Type': 'image/png',
+          'Content-Length': String(validPng.byteLength),
+        },
+        body: validPng,
+      }),
+      testEnv as never,
+      validContext,
+    );
+    await waitOnExecutionContext(validContext);
+    expect(valid.status).toBe(200);
+    const uploaded = (await valid.json()) as { attachment: { id: string } };
+    expect(uploaded.attachment.id.startsWith(`${mediaNamespaceForCustomer('a/b')}/`)).toBe(true);
+    expect(uploaded.attachment.id.startsWith(`${mediaNamespaceForCustomer('a')}/`)).toBe(false);
+
+    const spoofedContext = createExecutionContext();
+    const spoofed = await worker.fetch(
+      new Request('https://example.com/uploads', {
+        method: 'POST',
+        headers: {
+          Authorization: await authHeader('spoofed_image'),
+          'Content-Type': 'image/png',
+          'Content-Length': '4',
+        },
+        body: new TextEncoder().encode('html'),
+      }),
+      testEnv as never,
+      spoofedContext,
+    );
+    await waitOnExecutionContext(spoofedContext);
+    expect(spoofed.status).toBe(415);
   });
 
   it('health reports default channelPolicy', async () => {

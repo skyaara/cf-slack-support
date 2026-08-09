@@ -42,7 +42,9 @@ function createHost(conversation: SupportConversation): FeatureHost & {
     listConversations: () => [conv],
     getConversation: (id) => (id === conv.id ? conv : null),
     getConversationByThread: () => null,
+    getConversationByBinding: () => null,
     insertConversation: () => conv,
+    bindConversation: () => {},
     setConversationStatus: (id, status, at) => {
       if (id !== conv.id) return null;
       conv = {
@@ -56,6 +58,7 @@ function createHost(conversation: SupportConversation): FeatureHost & {
     insertMessage: (m) => m,
     findByClientId: () => null,
     findBySlackTs: () => null,
+    findMessageByExternalRef: () => null,
     messagesSince: () => [],
     rowToMessage: () => {
       throw new Error('unused');

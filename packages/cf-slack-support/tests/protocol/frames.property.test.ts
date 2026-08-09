@@ -91,4 +91,23 @@ describe('protocol frames', () => {
       attachmentIds: ['u1/a.png'],
     });
   });
+
+  it('rejects malformed and oversized known frames', () => {
+    expect(parseClientFrame(JSON.stringify({ type: 'send', body: 'missing client id' }))).toBeNull();
+    expect(
+      parseClientFrame(JSON.stringify({ type: 'send', clientId: 'c1', attachmentIds: 'bad' })),
+    ).toBeNull();
+    expect(
+      parseClientFrame(JSON.stringify({ type: 'send', clientId: 'c1', body: 'x'.repeat(8_001) })),
+    ).toBeNull();
+    expect(
+      parseClientFrame(
+        JSON.stringify({
+          type: 'send',
+          clientId: 'c1',
+          attachmentIds: Array.from({ length: 11 }, (_, index) => `u/a-${index}.png`),
+        }),
+      ),
+    ).toBeNull();
+  });
 });

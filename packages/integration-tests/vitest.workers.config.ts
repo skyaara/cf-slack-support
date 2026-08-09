@@ -26,7 +26,7 @@ export default defineWorkersConfig({
         wrangler: { configPath: './wrangler.toml' },
         miniflare: {
           bindings: {
-            SUPPORT_AUTH_SECRET: 'test-secret',
+            SUPPORT_AUTH_SECRET: 'test-secret-with-at-least-32-characters',
             SLACK_BOT_TOKEN: 'xoxb-test',
             SLACK_SIGNING_SECRET: 'slack-signing-secret',
             SUPPORT_PUBLIC_BASE_URL: 'https://support.test',

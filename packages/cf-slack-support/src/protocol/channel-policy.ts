@@ -5,6 +5,9 @@
  * **threads**. These policies control what happens when staff posts in the
  * **channel root** (no `thread_ts`) vs inside a thread.
  *
+ * This is Slack-specific (`inbox_with_threads` topology). Non-threaded channel
+ * adapters ignore it — see `cf-slack-support/channel`.
+ *
  * | Mode | Channel root (top-level) | Thread reply |
  * |------|--------------------------|--------------|
  * | `threads_only` | Dropped (staff must reply in-thread) | → customer |
@@ -73,7 +76,7 @@ export type InboundStaffDropReason =
 export type InboundStaffMessageDecision =
   | {
       action: 'deliver_to_customer';
-      /** Value stored as `conversation.slackThreadTs`. */
+      /** Value stored as conversation external location (Slack: `slackThreadTs`). */
       threadRoot: string;
       /** True when this Slack message is the parent of a new conversation. */
       isThreadParent: boolean;

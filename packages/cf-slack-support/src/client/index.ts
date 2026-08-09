@@ -16,6 +16,8 @@ export type {
 export type {
   ClientFrame,
   ServerFrame,
+  ConversationExternalBinding,
+  MessageExternalRef,
   SupportAttachment,
   SupportAuthorRole,
   SupportConversation,

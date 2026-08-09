@@ -64,6 +64,47 @@ export function extensionForMimeOrBin(mime: string): string {
   return extensionForMime(mime) || 'bin';
 }
 
+export function isSafeInlineImageMime(mime: string): boolean {
+  return mime === 'image/jpeg' || mime === 'image/png' || mime === 'image/webp' || mime === 'image/gif';
+}
+
+/** Validate the magic bytes for image types rendered inline by this package. */
+export function hasExpectedImageSignature(bytes: ArrayBuffer, mime: string): boolean {
+  const value = new Uint8Array(bytes);
+  switch (mime) {
+    case 'image/jpeg':
+      return value.length >= 3 && value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff;
+    case 'image/png':
+      return (
+        value.length >= 8 &&
+        value[0] === 0x89 &&
+        value[1] === 0x50 &&
+        value[2] === 0x4e &&
+        value[3] === 0x47 &&
+        value[4] === 0x0d &&
+        value[5] === 0x0a &&
+        value[6] === 0x1a &&
+        value[7] === 0x0a
+      );
+    case 'image/gif': {
+      const header = new TextDecoder().decode(value.slice(0, 6));
+      return header === 'GIF87a' || header === 'GIF89a';
+    }
+    case 'image/webp': {
+      const riff = new TextDecoder().decode(value.slice(0, 4));
+      const webp = new TextDecoder().decode(value.slice(8, 12));
+      return value.length >= 12 && riff === 'RIFF' && webp === 'WEBP';
+    }
+    default:
+      return false;
+  }
+}
+
+/** Render untrusted text literally inside Slack mrkdwn. */
+export function escapeSlackMrkdwn(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 /** Map internal failures to stable, user-safe WS error payloads. */
 export function clientSafeError(
   raw: string,
@@ -130,9 +171,11 @@ export function buildBlocks(
     });
   }
   if (message.body) {
+    const safeBody = escapeSlackMrkdwn(message.body);
+    const safeAuthor = escapeSlackMrkdwn(message.authorName || 'Customer');
     const text = opts?.asCustomUsername
-      ? message.body
-      : `*${message.authorName || 'Customer'}:*\n${message.body}`;
+      ? safeBody
+      : `*${safeAuthor}:*\n${safeBody}`;
     blocks.push({
       type: 'section',
       text: {
@@ -140,15 +183,6 @@ export function buildBlocks(
         text,
       },
     });
-  }
-  for (const attachment of message.attachments) {
-    if (attachment.contentType.startsWith('image/')) {
-      blocks.push({
-        type: 'image',
-        image_url: attachment.url,
-        alt_text: attachment.filename || 'image',
-      });
-    }
   }
   return blocks;
 }

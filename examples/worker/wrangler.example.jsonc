@@ -5,7 +5,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
     "SUPPORT_CHANNEL_PREFIX": "support",
-    "SUPPORT_CORS_ORIGINS": "*"
+    "SUPPORT_CORS_ORIGINS": "https://app.example.com"
   },
   "r2_buckets": [
     {

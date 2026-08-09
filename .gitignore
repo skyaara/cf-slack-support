@@ -10,3 +10,4 @@ dist/
 .wrangler/
 coverage/
 coverage-*/
+.bundle-measure/

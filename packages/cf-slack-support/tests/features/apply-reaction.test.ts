@@ -33,13 +33,16 @@ function createMockHost(initial: MessageRow): FeatureHost {
     listConversations: () => [],
     getConversation: () => null,
     getConversationByThread: () => null,
+    getConversationByBinding: () => null,
     insertConversation: () => {
       throw new Error('no');
     },
+    bindConversation: () => {},
     setConversationStatus: () => null,
     insertMessage: (m) => m,
     findByClientId: () => null,
     findBySlackTs: () => null,
+    findMessageByExternalRef: () => null,
     messagesSince: () => [],
     rowToMessage: (r) => ({
       id: r.id,

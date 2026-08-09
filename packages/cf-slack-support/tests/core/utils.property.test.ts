@@ -61,12 +61,12 @@ describe('core utils', () => {
     expect(e.message.toLowerCase()).not.toContain('unique');
   });
 
-  it('buildBlocks includes images and optional header', () => {
+  it('buildBlocks omits public image URLs and escapes untrusted mrkdwn', () => {
     const blocks = buildBlocks(
       {
         id: 'm1',
         conversationId: 'c1',
-        body: 'hi',
+        body: '<!channel> & hi',
         attachments: [
           {
             id: 'a',
@@ -76,13 +76,15 @@ describe('core utils', () => {
           },
         ],
         authorRole: 'customer',
-        authorName: 'Ada',
+        authorName: '<Ada>',
         createdAt: 1,
       },
       'Title',
     );
     expect(blocks.some((b) => (b as { type: string }).type === 'header')).toBe(true);
-    expect(blocks.some((b) => (b as { type: string }).type === 'image')).toBe(true);
+    expect(blocks.some((b) => (b as { type: string }).type === 'image')).toBe(false);
+    expect(JSON.stringify(blocks)).toContain('&lt;!channel&gt; &amp; hi');
+    expect(JSON.stringify(blocks)).toContain('&lt;Ada&gt;');
   });
 
   it('titleFromFirstMessage', () => {

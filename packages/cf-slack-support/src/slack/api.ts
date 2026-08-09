@@ -25,6 +25,34 @@ type SlackClientOptions = {
   fetch?: typeof fetch;
 };
 
+async function readResponseWithLimit(response: Response, maxBytes?: number): Promise<ArrayBuffer> {
+  if (!maxBytes || !response.body) return response.arrayBuffer();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel('Slack file exceeds configured limit');
+        throw new Error(`Slack file download rejected: exceeds ${maxBytes} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return combined.buffer;
+}
+
 async function slackFetch<T>(
   method: string,
   options: SlackClientOptions,
@@ -211,19 +239,33 @@ export function createSlackClient(options: SlackClientOptions) {
       });
     },
 
-    async downloadPrivateFile(urlPrivateDownload: string): Promise<{
+    async downloadPrivateFile(urlPrivateDownload: string, maxBytes?: number): Promise<{
       bytes: ArrayBuffer;
       contentType: string;
     }> {
+      let url: URL;
+      try {
+        url = new URL(urlPrivateDownload);
+      } catch {
+        throw new Error('Slack file download rejected: invalid URL');
+      }
+      if (url.protocol !== 'https:' || url.hostname !== 'files.slack.com') {
+        throw new Error('Slack file download rejected: untrusted origin');
+      }
       const doFetch = options.fetch ?? fetch;
-      const res = await doFetch(urlPrivateDownload, {
+      const res = await doFetch(url.toString(), {
         headers: { Authorization: `Bearer ${options.botToken}` },
       });
       if (!res.ok) {
         throw new Error(`Slack file download failed: ${res.status}`);
       }
+      const declaredLength = Number(res.headers.get('content-length'));
+      if (maxBytes && Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+        throw new Error(`Slack file download rejected: exceeds ${maxBytes} bytes`);
+      }
+      const bytes = await readResponseWithLimit(res, maxBytes);
       return {
-        bytes: await res.arrayBuffer(),
+        bytes,
         contentType: res.headers.get('content-type') || 'application/octet-stream',
       };
     },

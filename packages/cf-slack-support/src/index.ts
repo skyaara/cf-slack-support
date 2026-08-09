@@ -57,10 +57,14 @@ export type {
   InboundStaffDropReason,
   InboundStaffMessageDecision,
   InboundStaffMessageRef,
+  ChannelAdapterId,
+  ConversationExternalBinding,
+  MessageExternalRef,
 } from './protocol';
 
 export {
   DEFAULT_ALLOWED_MIME_TYPES,
+  CLIENT_FRAME_LIMITS,
   DEFAULT_MAX_IMAGE_BYTES,
   DEFAULT_ROUTES,
   parseClientFrame,
@@ -72,12 +76,24 @@ export {
   decideInboundStaffMessage,
   describeChannelPolicy,
   resolveChannelPolicy,
+  resolveConversationExternal,
+  resolveMessageExternal,
+  slackBindingFromLegacy,
+  slackMessageRef,
+  slackThreadTsFromExternal,
+  slackTsFromExternal,
 } from './protocol';
 
 // ── Worker helpers (opt-in via import; tree-shake unused) ───────────────
 export { createKvChannelIndex, createMemoryChannelIndex } from './channel-index';
 
-export { createR2MediaStore, mediaKeyFromPath, createMemoryMediaStore } from './media';
+export {
+  createR2MediaStore,
+  mediaKeyBelongsToCustomer,
+  mediaKeyFromPath,
+  mediaNamespaceForCustomer,
+  createMemoryMediaStore,
+} from './media';
 export type { R2MediaStoreOptions } from './media';
 
 export { verifySlackSignature, createSlackClient, slugifyChannelName } from './slack';
@@ -123,6 +139,7 @@ export type {
   HttpFeatureContext,
   ConversationRow,
   MessageRow,
+  InsertConversationInput,
   CustomerSupportDOClass,
   CustomerSupportDOConstructor,
 } from './core';
@@ -131,4 +148,5 @@ export type {
 // - createSupportClient → 'cf-slack-support/client'
 // - reactionsFeature    → 'cf-slack-support/features/reactions'
 // - lifecycleFeature    → 'cf-slack-support/features/lifecycle'
+// - channel adapters    → 'cf-slack-support/channel'
 // - emoji map           → 'cf-slack-support/emoji'

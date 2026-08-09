@@ -4,6 +4,7 @@ export type {
   FeatureHost,
   FeatureSql,
   HttpFeatureContext,
+  InsertConversationInput,
   MessageRow,
   SlackSupportOptions,
   SupportFeature,

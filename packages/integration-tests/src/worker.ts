@@ -52,10 +52,10 @@ const support = defineSlackSupport<Env>({
     },
     channelIndex: createKvChannelIndex(env.SUPPORT_INDEX),
     customers: env.CUSTOMER_SUPPORT,
-    staffUserIds: [],
+    staffUserIds: ['U_STAFF'],
     channelIsPrivate: true,
     channelName: (id) => slugifyChannelName(`support-${id.customerKey}`),
-    corsOrigins: '*',
+    corsOrigins: ['https://app.test'],
     channelPolicy: policyFromEnv(env),
   }),
 });

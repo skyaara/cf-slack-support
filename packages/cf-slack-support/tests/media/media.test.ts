@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import * as fc from 'fast-check';
-import { createMemoryMediaStore, mediaKeyFromPath } from '../../src/media';
+import {
+  createMemoryMediaStore,
+  mediaKeyBelongsToCustomer,
+  mediaKeyFromPath,
+  mediaNamespaceForCustomer,
+} from '../../src/media';
 
 describe('media store + path helper', () => {
   it('stores and retrieves objects', async () => {
@@ -34,5 +39,12 @@ describe('media store + path helper', () => {
     expect(mediaKeyFromPath('/media/a/b.png', '/media')).toBe('a/b.png');
     expect(mediaKeyFromPath('/media/../secret', '/media')).toBeNull();
     expect(mediaKeyFromPath('/other/a', '/media')).toBeNull();
+  });
+
+  it('uses unambiguous customer namespaces for nested-looking customer keys', () => {
+    const nestedKey = `${mediaNamespaceForCustomer('a/b')}/image.png`;
+    expect(mediaKeyBelongsToCustomer(nestedKey, 'a/b')).toBe(true);
+    expect(mediaKeyBelongsToCustomer(nestedKey, 'a')).toBe(false);
+    expect(mediaNamespaceForCustomer('a/b')).not.toContain('/');
   });
 });

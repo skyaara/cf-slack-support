@@ -12,11 +12,16 @@ import {
   describeChannelPolicy,
   resolveChannelPolicy,
 } from '../../protocol';
-import { mediaKeyFromPath } from '../../media';
+import {
+  mediaKeyBelongsToCustomer,
+  mediaKeyFromPath,
+  mediaNamespaceForCustomer,
+} from '../../media';
 import { verifySlackSignature } from '../../slack';
 import { createCustomerSupportDOClass } from '../do/customer-support-do';
 import type { HttpFeatureContext, SlackSupportOptions } from '../feature/types';
 import { extensionForMimeOrBin } from '../do/utils';
+import { hasExpectedImageSignature, isSafeInlineImageMime } from '../do/utils';
 
 type AppVariables = {
   runtime: SlackSupportRuntime;
@@ -55,29 +60,108 @@ function corsOriginOption(allowed: string[] | '*') {
   return (origin: string) => (allowed.includes(origin) ? origin : '');
 }
 
+const WS_PROTOCOL = 'cf-slack-support.v1';
+const WS_AUTH_PROTOCOL_PREFIX = 'cf-slack-support.auth.';
+
+function decodeWebSocketProtocolToken(request: Request): string | null {
+  const offered = (request.headers.get('sec-websocket-protocol') || '')
+    .split(',')
+    .map((value) => value.trim());
+  const authProtocol = offered.find((value) => value.startsWith(WS_AUTH_PROTOCOL_PREFIX));
+  if (!authProtocol) return null;
+  const encoded = authProtocol.slice(WS_AUTH_PROTOCOL_PREFIX.length);
+  if (!encoded || encoded.length > 24 * 1024) return null;
+  try {
+    const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+    const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='));
+    return new TextDecoder('utf-8', { fatal: true }).decode(
+      Uint8Array.from(binary, (character) => character.charCodeAt(0)),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function requestWithWebSocketAuthorization(request: Request): Request {
+  if (request.headers.has('Authorization')) return request;
+  const token = decodeWebSocketProtocolToken(request);
+  if (!token) return request;
+  const headers = new Headers(request.headers);
+  headers.set('Authorization', `Bearer ${token}`);
+  return new Request(request, { headers });
+}
+
+function isAllowedWebSocketOrigin(request: Request, allowed: string[] | '*'): boolean {
+  const origin = request.headers.get('Origin');
+  // Non-browser WebSocket clients commonly omit Origin. Browsers always send it.
+  if (!origin) return true;
+  return allowed === '*' || allowed.includes(origin);
+}
+
+async function readBodyWithLimit(
+  body: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+): Promise<ArrayBuffer | null> {
+  if (!body) return new ArrayBuffer(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel('body too large');
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const combined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return combined.buffer;
+}
+
 async function resolveIdentity<Env extends object>(
   options: SlackSupportOptions<Env>,
   request: Request,
   env: Env,
 ): Promise<SupportIdentity | Response> {
-  const url = new URL(request.url);
-  const queryToken = url.searchParams.get('token');
-  const req =
-    !request.headers.get('Authorization') && queryToken
-      ? (() => {
-          const headers = new Headers(request.headers);
-          headers.set('Authorization', `Bearer ${queryToken}`);
-          return new Request(request.url, {
-            method: request.method,
-            headers,
-          });
-        })()
-      : request;
-
-  const result = await options.authenticate(req, env);
+  const result = await options.authenticate(request, env);
   if (result instanceof Response) return result;
   if (!result) return new Response('Unauthorized', { status: 401 });
-  return result;
+  if (typeof result.customerKey !== 'string') {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  const customerKey = result.customerKey.trim();
+  if (
+    !customerKey ||
+    customerKey.length > 256 ||
+    /[\u0000-\u001f\u007f]/.test(customerKey) ||
+    (result.displayName !== undefined &&
+      (typeof result.displayName !== 'string' || result.displayName.length > 200)) ||
+    (result.meta !== undefined &&
+      (!result.meta || typeof result.meta !== 'object' || Array.isArray(result.meta)))
+  ) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  if (result.meta) {
+    try {
+      if (JSON.stringify(result.meta).length > 12 * 1024) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+    } catch {
+      return new Response('Unauthorized', { status: 401 });
+    }
+  }
+  return { ...result, customerKey };
 }
 
 /**
@@ -148,12 +232,22 @@ export function defineSlackSupport<Env extends object>(
     if (!runtime.media?.store) return c.text('Not found', 404);
     const key = mediaKeyFromPath(new URL(c.req.url).pathname, media);
     if (!key) return c.text('Not found', 404);
+    if (runtime.media.publicRead !== true) {
+      const auth = await resolveIdentity(options, c.req.raw, c.env);
+      if (auth instanceof Response) return auth;
+      if (!mediaKeyBelongsToCustomer(key, auth.customerKey)) return c.text('Not found', 404);
+    }
     const object = await runtime.media.store.get(key);
     if (!object) return c.text('Not found', 404);
     const headers = new Headers({
       'Content-Type': object.contentType,
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Cache-Control': runtime.media.publicRead === true ? 'public, max-age=300' : 'private, no-store',
+      'X-Content-Type-Options': 'nosniff',
     });
+    if (!isSafeInlineImageMime(object.contentType)) {
+      const filename = key.split('/').pop()?.replace(/["\\\r\n]/g, '_') || 'attachment.bin';
+      headers.set('Content-Disposition', `attachment; filename="${filename}"`);
+    }
     if (object.etag) headers.set('ETag', object.etag);
     if (object.bytes != null) headers.set('Content-Length', String(object.bytes));
     return new Response(object.body, { headers });
@@ -161,7 +255,14 @@ export function defineSlackSupport<Env extends object>(
 
   app.post(slackEvents, async (c) => {
     const runtime = c.get('runtime');
+    const declaredLength = Number(c.req.header('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > 1024 * 1024) {
+      return c.text('Payload too large', 413);
+    }
     const rawBody = await c.req.text();
+    if (new TextEncoder().encode(rawBody).byteLength > 1024 * 1024) {
+      return c.text('Payload too large', 413);
+    }
     const valid = await verifySlackSignature({
       signingSecret: runtime.slack.signingSecret,
       signature: c.req.header('x-slack-signature') ?? null,
@@ -172,7 +273,7 @@ export function defineSlackSupport<Env extends object>(
       return c.text('Invalid signature', 401);
     }
 
-    const payload = JSON.parse(rawBody) as {
+    let payload: {
       type?: string;
       challenge?: string;
       event?: {
@@ -189,6 +290,11 @@ export function defineSlackSupport<Env extends object>(
         item?: { type?: string; channel?: string; ts?: string };
       };
     };
+    try {
+      payload = JSON.parse(rawBody) as typeof payload;
+    } catch {
+      return c.text('Invalid JSON', 400);
+    }
 
     if (payload.type === 'url_verification' && payload.challenge) {
       return c.text(payload.challenge);
@@ -254,11 +360,22 @@ export function defineSlackSupport<Env extends object>(
       runtime.media.allowedMimeTypes ?? [...DEFAULT_ALLOWED_MIME_TYPES];
 
     const contentType = c.req.header('content-type') || '';
+    const declaredLength = Number(c.req.header('content-length'));
+    // Multipart adds boundary/header overhead; leave a small fixed allowance.
+    const declaredLimit = contentType.includes('multipart/form-data')
+      ? maxImageBytes + 1024 * 1024
+      : maxImageBytes;
+    if (Number.isFinite(declaredLength) && declaredLength > declaredLimit) {
+      return c.json({ error: `File too large (max ${maxImageBytes} bytes)` }, 413);
+    }
     let bytes: ArrayBuffer;
     let mime: string;
     let filename: string | undefined;
 
     if (contentType.includes('multipart/form-data')) {
+      if (!Number.isFinite(declaredLength) || declaredLength < 0) {
+        return c.json({ error: 'Content-Length is required for multipart uploads' }, 411);
+      }
       const form = await c.req.formData();
       const file = form.get('file');
       if (!(file instanceof File)) {
@@ -270,7 +387,11 @@ export function defineSlackSupport<Env extends object>(
     } else {
       mime = contentType.split(';')[0]?.trim() || 'application/octet-stream';
       filename = c.req.header('x-filename') || undefined;
-      bytes = await c.req.arrayBuffer();
+      const limited = await readBodyWithLimit(c.req.raw.body, maxImageBytes);
+      if (!limited) {
+        return c.json({ error: `File too large (max ${maxImageBytes} bytes)` }, 413);
+      }
+      bytes = limited;
     }
 
     if (!allowedMimeTypes.includes(mime)) {
@@ -279,8 +400,11 @@ export function defineSlackSupport<Env extends object>(
     if (bytes.byteLength > maxImageBytes) {
       return c.json({ error: `File too large (max ${maxImageBytes} bytes)` }, 413);
     }
+    if (isSafeInlineImageMime(mime) && !hasExpectedImageSignature(bytes, mime)) {
+      return c.json({ error: 'File content does not match its declared image type' }, 415);
+    }
 
-    const key = `${auth.customerKey}/${crypto.randomUUID()}.${extensionForMimeOrBin(mime)}`;
+    const key = `${mediaNamespaceForCustomer(auth.customerKey)}/${crypto.randomUUID()}.${extensionForMimeOrBin(mime)}`;
     await runtime.media.store.put({
       key,
       body: bytes,
@@ -357,7 +481,11 @@ async function upgradeWebSocket<Env extends object>(
   env: Env,
   runtime: SlackSupportRuntime,
 ): Promise<Response> {
-  const auth = await resolveIdentity(options, request, env);
+  if (!isAllowedWebSocketOrigin(request, runtime.corsOrigins)) {
+    return new Response('Origin not allowed', { status: 403 });
+  }
+  const authenticatedRequest = requestWithWebSocketAuthorization(request);
+  const auth = await resolveIdentity(options, authenticatedRequest, env);
   if (auth instanceof Response) return auth;
 
   const stub = runtime.customers.get(runtime.customers.idFromName(auth.customerKey));
@@ -367,5 +495,16 @@ async function upgradeWebSocket<Env extends object>(
   if (auth.meta && Object.keys(auth.meta).length > 0) {
     doUrl.searchParams.set('meta', JSON.stringify(auth.meta));
   }
-  return stub.fetch(doUrl.toString(), request);
+  const forwardedHeaders = new Headers(request.headers);
+  const offeredProtocols = (request.headers.get('sec-websocket-protocol') || '')
+    .split(',')
+    .map((value) => value.trim());
+  if (offeredProtocols.includes(WS_PROTOCOL)) {
+    forwardedHeaders.set('Sec-WebSocket-Protocol', WS_PROTOCOL);
+  } else {
+    forwardedHeaders.delete('Sec-WebSocket-Protocol');
+  }
+  forwardedHeaders.delete('Authorization');
+  const forwarded = new Request(request, { headers: forwardedHeaders });
+  return stub.fetch(doUrl.toString(), forwarded);
 }

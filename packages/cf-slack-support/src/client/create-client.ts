@@ -23,7 +23,7 @@ type EventKey = keyof SupportClientEvents;
 export type CreateSupportClientOptions = {
   /** Base URL of the support worker, e.g. https://www.flickks.com/support-api */
   baseUrl: string;
-  /** Bearer token (or any token your authenticate hook accepts). */
+  /** Short-lived bearer token (or any token your authenticate hook accepts). */
   getToken: () => string | Promise<string>;
   /** Path overrides - must match server `routes` / `basePath`. */
   paths?: Partial<{
@@ -50,6 +50,13 @@ function toWsUrl(httpUrl: string): string {
   if (httpUrl.startsWith('https://')) return `wss://${httpUrl.slice('https://'.length)}`;
   if (httpUrl.startsWith('http://')) return `ws://${httpUrl.slice('http://'.length)}`;
   return httpUrl;
+}
+
+function base64UrlEncode(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 /**
@@ -124,12 +131,13 @@ export function createSupportClient(options: CreateSupportClientOptions) {
     const token = await options.getToken();
     const httpWs = joinUrl(options.baseUrl, wsPath);
     const url = new URL(toWsUrl(httpWs));
-    // Tokens in query are a fallback for environments that cannot set WS headers.
-    url.searchParams.set('token', token);
-
-    // Auth is via `?token=` (browsers cannot set Authorization on WebSocket).
-    // Do not pass an empty protocols array — some stacks treat it oddly.
-    const ws = new WebSocket(url.toString());
+    // Browsers cannot set Authorization on WebSocket. Carry an encoded credential
+    // in an offered subprotocol so it does not enter request URLs/access logs; the
+    // server selects only the stable protocol and strips the credential protocol.
+    const ws = new WebSocket(url.toString(), [
+      'cf-slack-support.v1',
+      `cf-slack-support.auth.${base64UrlEncode(token)}`,
+    ]);
     socket = ws;
 
     ws.addEventListener('open', () => {
@@ -230,6 +238,19 @@ export function createSupportClient(options: CreateSupportClientOptions) {
     return data.attachment;
   }
 
+  /** Fetch protected media using the same bearer credential as uploads. */
+  async function downloadAttachment(
+    attachment: Pick<SupportAttachment, 'url'> | string,
+  ): Promise<Blob> {
+    const token = await options.getToken();
+    const url = typeof attachment === 'string' ? attachment : attachment.url;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error(`Attachment download failed (${res.status})`);
+    return res.blob();
+  }
+
   function openConversation(title?: string): string {
     const clientId = crypto.randomUUID();
     sendFrame({ type: 'open_conversation', clientId, title });
@@ -274,6 +295,7 @@ export function createSupportClient(options: CreateSupportClientOptions) {
     disconnect,
     on,
     uploadImage,
+    downloadAttachment,
     openConversation,
     closeConversation,
     reopenConversation,

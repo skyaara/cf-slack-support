@@ -48,7 +48,16 @@ async function setConversationLifecycle(
   };
 
   let slackTs: string | undefined;
-  if (conversation.slackThreadTs) {
+  const binding =
+    conversation.external ??
+    (conversation.slackThreadTs
+      ? {
+          adapterId: 'slack' as const,
+          inboxId: input.channelId,
+          locationId: conversation.slackThreadTs,
+        }
+      : null);
+  if (binding?.adapterId === 'slack' && binding.locationId) {
     try {
       const runtime = await host.runtime();
       const slack = createSlackClient({ botToken: runtime.slack.botToken });
@@ -57,9 +66,9 @@ async function setConversationLifecycle(
           ? '_Request closed by customer_'
           : '_Request reopened by customer_';
       const posted = await slack.postMessage({
-        channel: input.channelId,
+        channel: binding.inboxId ?? input.channelId,
         text: notice,
-        threadTs: conversation.slackThreadTs,
+        threadTs: binding.locationId,
       });
       slackTs = posted.ts;
     } catch (err) {
@@ -71,13 +80,18 @@ async function setConversationLifecycle(
     }
   }
 
-  const stored = host.insertMessage({ ...systemMessage, slackTs });
+  const stored = host.insertMessage({
+    ...systemMessage,
+    external: slackTs ? { adapterId: 'slack', messageId: slackTs } : null,
+    slackTs,
+  });
   const runtime = await host.runtime();
   await runtime.onMessage?.({
     customerKey: input.customerKey,
     message: stored,
     conversation,
     direction: 'to_slack',
+    adapterId: 'slack',
   });
 
   return { conversation, systemMessage: stored, noop: false };

@@ -1,6 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import type {
   ClientFrame,
+  ConversationExternalBinding,
+  MessageExternalRef,
   SupportAttachment,
   SupportConversation,
   SupportConversationStatus,
@@ -11,14 +13,25 @@ import type {
 import type { ChannelPolicyInput } from '../../protocol';
 import {
   DEFAULT_ALLOWED_MIME_TYPES,
+  DEFAULT_MAX_IMAGE_BYTES,
+  CLIENT_FRAME_LIMITS,
   decideInboundStaffMessage,
   parseClientFrame,
   resolveChannelPolicy,
+  resolveConversationExternal,
+  resolveMessageExternal,
+  slackBindingFromLegacy,
+  slackMessageRef,
+  slackThreadTsFromExternal,
+  slackTsFromExternal,
 } from '../../protocol';
+import { createSlackChannelAdapter } from '../../channel';
+import { mediaKeyBelongsToCustomer, mediaNamespaceForCustomer } from '../../media';
 import { createSlackClient, slugifyChannelName } from '../../slack';
 import type {
   ConversationRow,
   FeatureHost,
+  InsertConversationInput,
   MessageRow,
   SlackSupportOptions,
   SupportFeature,
@@ -27,7 +40,10 @@ import { applyCoreSchema } from './schema';
 import {
   buildBlocks,
   clientSafeError,
+  escapeSlackMrkdwn,
   extensionForMime,
+  hasExpectedImageSignature,
+  isSafeInlineImageMime,
   isMissingChannelError,
   jsonAttachments,
   jsonReactions,
@@ -36,6 +52,9 @@ import {
   parseReactions,
   titleFromFirstMessage,
 } from './utils';
+
+const CONVERSATION_SELECT = `id, title, slack_thread_ts, status, closed_at, created_at, updated_at,
+  external_adapter_id, external_inbox_id, external_location_id`;
 
 type WsAttachment = {
   customerKey: string;
@@ -63,9 +82,20 @@ type SlackMessageEvent = {
   files?: SlackFile[];
 };
 
+type SlackActorEvent = {
+  type?: string;
+  user?: string;
+  channel?: string;
+  item?: { channel?: string };
+};
+
 /**
- * Per-customer Durable Object: Slack channel + threads, SQLite history,
+ * Per-customer Durable Object: channel adapters + SQLite history,
  * hibernatable WebSockets, and pluggable features.
+ *
+ * Conversations are durable units bound to external locations via
+ * {@link ConversationExternalBinding} (Slack threads today; agents / other
+ * apps later). Nested threads are a Slack capability, not the core model.
  */
 export type CustomerSupportDOConstructor<Env extends object = Record<string, unknown>> = {
   new (ctx: DurableObjectState, env: Env): DurableObject<Env>;
@@ -103,11 +133,14 @@ export function createCustomerSupportDOClass<Env extends object>(
         listConversations: () => self.listConversations(),
         getConversation: (id) => self.getConversation(id),
         getConversationByThread: (ts) => self.getConversationByThread(ts),
+        getConversationByBinding: (b) => self.getConversationByBinding(b),
         insertConversation: (input) => self.insertConversation(input),
+        bindConversation: (id, binding) => self.bindConversation(id, binding),
         setConversationStatus: (id, status, at) => self.setConversationStatus(id, status, at),
         insertMessage: (m) => self.insertMessage(m),
         findByClientId: (id) => self.findByClientId(id),
         findBySlackTs: (ts) => self.findBySlackTs(ts),
+        findMessageByExternalRef: (ref) => self.findMessageByExternalRef(ref),
         messagesSince: (id, limit) => self.messagesSince(id, limit),
         rowToMessage: (row) => self.rowToMessage(row),
         broadcast: (frame, except) => self.broadcast(frame, except),
@@ -151,12 +184,29 @@ export function createCustomerSupportDOClass<Env extends object>(
       this.metaDelete('slack_channel_topic');
     }
 
+    private externalFromConversationRow(r: ConversationRow): ConversationExternalBinding | null {
+      if (r.external_adapter_id && r.external_location_id) {
+        return {
+          adapterId: r.external_adapter_id,
+          ...(r.external_inbox_id ? { inboxId: r.external_inbox_id } : {}),
+          locationId: r.external_location_id,
+        };
+      }
+      return slackBindingFromLegacy({
+        channelId: this.metaGet('slack_channel_id'),
+        slackThreadTs: r.slack_thread_ts,
+      });
+    }
+
     private mapConversationRow(r: ConversationRow): SupportConversation {
       const status: SupportConversationStatus = r.status === 'closed' ? 'closed' : 'open';
+      const external = this.externalFromConversationRow(r);
       let conversation: SupportConversation = {
         id: r.id,
         title: r.title ?? null,
-        slackThreadTs: r.slack_thread_ts ?? null,
+        external,
+        slackThreadTs:
+          r.slack_thread_ts ?? slackThreadTsFromExternal(external) ?? null,
         status,
         closedAt: status === 'closed' && typeof r.closed_at === 'number' ? r.closed_at : null,
         createdAt: r.created_at,
@@ -196,10 +246,22 @@ export function createCustomerSupportDOClass<Env extends object>(
       return fallback;
     }
 
+    private async isAuthorizedSlackActor(event: SlackActorEvent): Promise<boolean> {
+      const userId = event.user?.trim();
+      const channelId = event.channel?.trim() || event.item?.channel?.trim();
+      const eventType = event.type?.trim();
+      if (!userId || !channelId || !eventType) return false;
+      const runtime = await this.runtime();
+      if (runtime.authorizeSlackActor) {
+        return Boolean(await runtime.authorizeSlackActor({ userId, channelId, eventType }));
+      }
+      return runtime.staffUserIds.includes(userId);
+    }
+
     private listConversations(): SupportConversation[] {
       const rows = this.ctx.storage.sql
         .exec<ConversationRow>(
-          `SELECT id, title, slack_thread_ts, status, closed_at, created_at, updated_at
+          `SELECT ${CONVERSATION_SELECT}
            FROM conversations ORDER BY updated_at DESC`,
         )
         .toArray();
@@ -209,7 +271,7 @@ export function createCustomerSupportDOClass<Env extends object>(
     private getConversation(id: string): SupportConversation | null {
       const r = this.ctx.storage.sql
         .exec<ConversationRow>(
-          `SELECT id, title, slack_thread_ts, status, closed_at, created_at, updated_at
+          `SELECT ${CONVERSATION_SELECT}
            FROM conversations WHERE id = ?`,
           id,
         )
@@ -218,47 +280,100 @@ export function createCustomerSupportDOClass<Env extends object>(
     }
 
     private getConversationByThread(threadTs: string): SupportConversation | null {
-      const r = this.ctx.storage.sql
-        .exec<ConversationRow>(
-          `SELECT id, title, slack_thread_ts, status, closed_at, created_at, updated_at
-           FROM conversations WHERE slack_thread_ts = ?`,
-          threadTs,
-        )
-        .toArray()[0];
-      return r ? this.mapConversationRow(r) : null;
+      return this.getConversationByBinding({ adapterId: 'slack', locationId: threadTs });
     }
 
-    private insertConversation(input: {
-      id: string;
-      title: string | null;
-      slackThreadTs: string | null;
-      createdAt: number;
-      status?: SupportConversationStatus;
-      closedAt?: number | null;
-    }): SupportConversation {
+    private getConversationByBinding(
+      binding: Pick<ConversationExternalBinding, 'adapterId' | 'locationId'>,
+    ): SupportConversation | null {
+      const byExternal = this.ctx.storage.sql
+        .exec<ConversationRow>(
+          `SELECT ${CONVERSATION_SELECT}
+           FROM conversations
+           WHERE external_adapter_id = ? AND external_location_id = ?`,
+          binding.adapterId,
+          binding.locationId,
+        )
+        .toArray()[0];
+      if (byExternal) return this.mapConversationRow(byExternal);
+
+      // Legacy Slack rows before external_* backfill / dual-write.
+      if (binding.adapterId === 'slack') {
+        const bySlack = this.ctx.storage.sql
+          .exec<ConversationRow>(
+            `SELECT ${CONVERSATION_SELECT}
+             FROM conversations WHERE slack_thread_ts = ?`,
+            binding.locationId,
+          )
+          .toArray()[0];
+        return bySlack ? this.mapConversationRow(bySlack) : null;
+      }
+      return null;
+    }
+
+    private insertConversation(input: InsertConversationInput): SupportConversation {
       const status: SupportConversationStatus = input.status ?? 'open';
       const closedAt = status === 'closed' ? (input.closedAt ?? input.createdAt) : null;
+      const external = resolveConversationExternal({
+        external: input.external,
+        slackThreadTs: input.slackThreadTs,
+        channelId: this.metaGet('slack_channel_id'),
+      });
+      const slackThreadTs =
+        input.slackThreadTs ?? slackThreadTsFromExternal(external) ?? null;
+
       this.ctx.storage.sql.exec(
         `INSERT INTO conversations (
-           id, title, slack_thread_ts, status, closed_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           id, title, slack_thread_ts, status, closed_at, created_at, updated_at,
+           external_adapter_id, external_inbox_id, external_location_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         input.id,
         input.title,
-        input.slackThreadTs,
+        slackThreadTs,
         status,
         closedAt,
         input.createdAt,
         input.createdAt,
+        external?.adapterId ?? null,
+        external?.inboxId ?? null,
+        external?.locationId ?? null,
       );
       return this.mapConversationRow({
         id: input.id,
         title: input.title,
-        slack_thread_ts: input.slackThreadTs,
+        slack_thread_ts: slackThreadTs,
         status,
         closed_at: closedAt,
         created_at: input.createdAt,
         updated_at: input.createdAt,
+        external_adapter_id: external?.adapterId ?? null,
+        external_inbox_id: external?.inboxId ?? null,
+        external_location_id: external?.locationId ?? null,
       });
+    }
+
+    private bindConversation(
+      conversationId: string,
+      binding: ConversationExternalBinding,
+    ): void {
+      const at = Date.now();
+      const slackThreadTs =
+        binding.adapterId === 'slack' ? binding.locationId : null;
+      this.ctx.storage.sql.exec(
+        `UPDATE conversations SET
+           updated_at = ?,
+           external_adapter_id = ?,
+           external_inbox_id = ?,
+           external_location_id = ?,
+           slack_thread_ts = COALESCE(?, slack_thread_ts)
+         WHERE id = ?`,
+        at,
+        binding.adapterId,
+        binding.inboxId ?? null,
+        binding.locationId,
+        slackThreadTs,
+        conversationId,
+      );
     }
 
     private setConversationStatus(
@@ -286,13 +401,34 @@ export function createCustomerSupportDOClass<Env extends object>(
       };
     }
 
-    private touchConversation(id: string, at: number, slackThreadTs?: string | null): void {
-      if (slackThreadTs !== undefined) {
+    private touchConversation(
+      id: string,
+      at: number,
+      bindingOrSlackThread?: ConversationExternalBinding | string | null,
+    ): void {
+      if (bindingOrSlackThread && typeof bindingOrSlackThread === 'object') {
+        this.bindConversation(id, bindingOrSlackThread);
         this.ctx.storage.sql.exec(
-          `UPDATE conversations SET updated_at = ?, slack_thread_ts = COALESCE(?, slack_thread_ts)
+          `UPDATE conversations SET updated_at = ? WHERE id = ?`,
+          at,
+          id,
+        );
+        return;
+      }
+      if (bindingOrSlackThread !== undefined) {
+        const slackThreadTs = bindingOrSlackThread;
+        this.ctx.storage.sql.exec(
+          `UPDATE conversations SET
+             updated_at = ?,
+             slack_thread_ts = COALESCE(?, slack_thread_ts),
+             external_adapter_id = COALESCE(external_adapter_id, 'slack'),
+             external_location_id = COALESCE(?, external_location_id),
+             external_inbox_id = COALESCE(external_inbox_id, ?)
            WHERE id = ?`,
           at,
           slackThreadTs,
+          slackThreadTs,
+          this.metaGet('slack_channel_id'),
           id,
         );
       } else {
@@ -316,7 +452,19 @@ export function createCustomerSupportDOClass<Env extends object>(
     private rowToMessage(r: MessageRow): SupportMessage {
       const role = r.author_role;
       const authorRole: SupportMessage['authorRole'] =
-        role === 'customer' || role === 'staff' || role === 'system' ? role : 'system';
+        role === 'customer' ||
+        role === 'staff' ||
+        role === 'agent' ||
+        role === 'system'
+          ? role
+          : 'system';
+      const external = resolveMessageExternal({
+        external:
+          r.external_adapter_id && r.external_message_id
+            ? { adapterId: r.external_adapter_id, messageId: r.external_message_id }
+            : null,
+        slackTs: r.slack_ts,
+      });
       let message: SupportMessage = {
         id: r.id,
         conversationId: r.conversation_id,
@@ -326,7 +474,8 @@ export function createCustomerSupportDOClass<Env extends object>(
         authorName: r.author_name?.trim() ? r.author_name.trim() : undefined,
         createdAt: r.created_at,
         clientId: r.client_id ?? undefined,
-        slackTs: r.slack_ts ?? undefined,
+        external,
+        slackTs: r.slack_ts ?? slackTsFromExternal(external) ?? undefined,
       };
       // Core maps reactions when column present so data is not lost without feature
       // enrich; feature can further transform via enrichMessage.
@@ -343,23 +492,46 @@ export function createCustomerSupportDOClass<Env extends object>(
     }
 
     private insertMessage(message: SupportMessage): SupportMessage {
-      let slackTs = message.slackTs ?? null;
-      if (slackTs && this.findBySlackTs(slackTs)) {
+      const external = resolveMessageExternal({
+        external: message.external,
+        slackTs: message.slackTs,
+      });
+      let externalMessageId = external?.messageId ?? null;
+      const externalAdapterId = external?.adapterId ?? null;
+      let slackTs =
+        message.slackTs ??
+        (externalAdapterId === 'slack' ? externalMessageId : null) ??
+        null;
+
+      if (external && this.findMessageByExternalRef(external)) {
+        console.warn('[cf-slack-support] external message ref already stored; inserting without it', {
+          messageId: message.id,
+          external,
+        });
+        externalMessageId = null;
+        if (external.adapterId === 'slack') slackTs = null;
+      } else if (slackTs && this.findBySlackTs(slackTs)) {
         console.warn('[cf-slack-support] slack_ts already stored; inserting without it', {
           messageId: message.id,
           slackTs,
         });
         slackTs = null;
+        if (externalAdapterId === 'slack') externalMessageId = null;
       }
 
       const reactionsJson = jsonReactions(message.reactions ?? []);
+      const storedExternal =
+        externalAdapterId && externalMessageId
+          ? { adapterId: externalAdapterId, messageId: externalMessageId }
+          : null;
 
       try {
         this.ctx.storage.sql.exec(
           `INSERT INTO messages (
             id, conversation_id, body, attachments_json, author_role, author_name,
-            created_at, client_id, slack_ts, reactions_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            created_at, client_id, slack_ts, reactions_json,
+            external_adapter_id, external_message_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           message.id,
           message.conversationId,
           message.body,
@@ -370,15 +542,21 @@ export function createCustomerSupportDOClass<Env extends object>(
           message.clientId ?? null,
           slackTs,
           reactionsJson,
+          storedExternal?.adapterId ?? null,
+          storedExternal?.messageId ?? null,
         );
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);
-        if (slackTs && /UNIQUE constraint failed:\s*messages\.slack_ts/i.test(raw)) {
+        const uniqueHit =
+          /UNIQUE constraint failed:\s*messages\.(slack_ts|external_message_id)/i.test(raw) ||
+          /UNIQUE constraint failed:\s*messages_external_ref/i.test(raw);
+        if ((slackTs || storedExternal) && uniqueHit) {
           this.ctx.storage.sql.exec(
             `INSERT INTO messages (
               id, conversation_id, body, attachments_json, author_role, author_name,
-              created_at, client_id, slack_ts, reactions_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              created_at, client_id, slack_ts, reactions_json,
+              external_adapter_id, external_message_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             message.id,
             message.conversationId,
             message.body,
@@ -389,6 +567,8 @@ export function createCustomerSupportDOClass<Env extends object>(
             message.clientId ?? null,
             null,
             reactionsJson,
+            null,
+            null,
           );
           slackTs = null;
         } else {
@@ -396,9 +576,12 @@ export function createCustomerSupportDOClass<Env extends object>(
         }
       }
       this.touchConversation(message.conversationId, message.createdAt);
+      const finalExternal =
+        storedExternal ?? (slackTs ? slackMessageRef(slackTs) : null);
       return {
         ...message,
-        slackTs: slackTs ?? undefined,
+        external: finalExternal,
+        slackTs: slackTs ?? slackTsFromExternal(finalExternal) ?? undefined,
         reactions: message.reactions?.length ? message.reactions : undefined,
       };
     }
@@ -411,10 +594,27 @@ export function createCustomerSupportDOClass<Env extends object>(
     }
 
     private findBySlackTs(slackTs: string): SupportMessage | null {
-      const r = this.ctx.storage.sql
-        .exec<MessageRow>(`SELECT * FROM messages WHERE slack_ts = ?`, slackTs)
+      return this.findMessageByExternalRef({ adapterId: 'slack', messageId: slackTs });
+    }
+
+    private findMessageByExternalRef(ref: MessageExternalRef): SupportMessage | null {
+      const byExternal = this.ctx.storage.sql
+        .exec<MessageRow>(
+          `SELECT * FROM messages
+           WHERE external_adapter_id = ? AND external_message_id = ?`,
+          ref.adapterId,
+          ref.messageId,
+        )
         .toArray()[0];
-      return r ? this.rowToMessage(r) : null;
+      if (byExternal) return this.rowToMessage(byExternal);
+
+      if (ref.adapterId === 'slack') {
+        const bySlack = this.ctx.storage.sql
+          .exec<MessageRow>(`SELECT * FROM messages WHERE slack_ts = ?`, ref.messageId)
+          .toArray()[0];
+        return bySlack ? this.rowToMessage(bySlack) : null;
+      }
+      return null;
     }
 
     private messagesSince(lastSeenId: string | undefined, limit = 200): SupportMessage[] {
@@ -655,7 +855,7 @@ export function createCustomerSupportDOClass<Env extends object>(
       }
       const out: SupportAttachment[] = [];
       for (const id of attachmentIds) {
-        if (!id.startsWith(`${customerKey}/`)) {
+        if (!mediaKeyBelongsToCustomer(id, customerKey)) {
           throw new Error(`Invalid attachment id for customer: ${id}`);
         }
         const stored = await runtime.media.store.get(id);
@@ -670,87 +870,114 @@ export function createCustomerSupportDOClass<Env extends object>(
       return out;
     }
 
-    private slackPostAs(identity: SupportIdentity): { username?: string; iconUrl?: string } {
-      const username =
-        typeof identity.meta?.username === 'string' ? identity.meta.username.trim() : '';
-      const iconUrl =
-        typeof identity.meta?.profilePhotoUrl === 'string'
-          ? identity.meta.profilePhotoUrl.trim()
-          : typeof identity.meta?.profile_photo_url === 'string'
-            ? identity.meta.profile_photo_url.trim()
-            : '';
-      const display = username || identity.displayName?.trim() || undefined;
-      return {
-        username: display || undefined,
-        iconUrl: iconUrl || undefined,
-      };
-    }
-
     private async postToSlack(input: {
       runtime: SlackSupportRuntime;
       channelId: string;
       conversation: SupportConversation;
       message: SupportMessage;
     }): Promise<{ slackTs: string; threadTs: string }> {
-      const slack = createSlackClient({ botToken: input.runtime.slack.botToken });
-      let threadTs = input.conversation.slackThreadTs;
-      const postAs = this.slackPostAs(this.identityFromMeta());
-
-      const imageAttachments = input.message.attachments.filter((a) =>
-        a.contentType.startsWith('image/'),
+      const policy = resolveChannelPolicy(
+        await this.effectiveChannelPolicy(input.runtime),
       );
-      const otherAttachments = input.message.attachments.filter(
-        (a) => !a.contentType.startsWith('image/'),
-      );
-      const textParts: string[] = [];
-      if (input.message.body) textParts.push(input.message.body);
-      for (const a of otherAttachments) {
-        textParts.push(a.url);
-      }
-      const text =
-        textParts.join('\n') ||
-        (imageAttachments.length
-          ? `${postAs.username || input.message.authorName || 'Customer'} sent an image`
-          : `${postAs.username || input.message.authorName || 'Customer'} sent an attachment`);
+      const identity = this.identityFromMeta();
 
-      let channelId = input.channelId;
-      let isParent = !threadTs;
-      const postOnce = async () =>
-        slack.postMessage({
-          channel: channelId,
-          text:
-            isParent && input.conversation.title
-              ? `*${input.conversation.title}*\n${text}`
-              : text,
-          threadTs: isParent ? undefined : threadTs ?? undefined,
-          blocks: buildBlocks(
-            input.message,
-            isParent ? input.conversation.title : null,
-            { asCustomUsername: Boolean(postAs.username) },
-          ),
-          username: postAs.username,
-          iconUrl: postAs.iconUrl,
+      const adapter = createSlackChannelAdapter({
+        inboxRouting: policy.mode,
+        ensureInbox: async (id) => {
+          const ensured = await this.ensureChannel(id);
+          return { inboxId: ensured.channelId, created: ensured.created };
+        },
+        postMessage: async (postInput) => {
+          const slack = createSlackClient({ botToken: input.runtime.slack.botToken });
+          const textParts: string[] = [];
+          if (postInput.message.body) textParts.push(escapeSlackMrkdwn(postInput.message.body));
+          const text =
+            textParts.join('\n') ||
+            `${escapeSlackMrkdwn(postInput.message.authorName || 'Customer')} sent an attachment`;
+
+          let channelId = postInput.inboxId;
+          let threadTs = postInput.threadTs;
+          let isParent = !threadTs;
+          const postOnce = async () =>
+            slack.postMessage({
+              channel: channelId,
+              text:
+                isParent && postInput.conversation.title
+                  ? `*${escapeSlackMrkdwn(postInput.conversation.title)}*\n${text}`
+                  : text,
+              threadTs: isParent ? undefined : threadTs ?? undefined,
+              blocks: buildBlocks(
+                { ...postInput.message, attachments: [] },
+                isParent ? postInput.conversation.title : null,
+              ),
+            });
+
+          const uploadAttachments = async (threadRootTs: string) => {
+            if (!input.runtime.media?.store) return;
+            for (const attachment of postInput.message.attachments) {
+              try {
+                const stored = await input.runtime.media.store.get(attachment.id);
+                if (!stored) continue;
+                const bytes = await new Response(stored.body).arrayBuffer();
+                await slack.uploadFile({
+                  channelId,
+                  threadTs: threadRootTs,
+                  filename:
+                    attachment.filename?.replace(/[\\/\r\n]/g, '_').slice(0, 180) ||
+                    `attachment.${extensionForMime(stored.contentType) || 'bin'}`,
+                  contentType: stored.contentType,
+                  bytes,
+                  title: attachment.filename?.slice(0, 180),
+                });
+              } catch (err) {
+                console.warn('[cf-slack-support] native Slack attachment upload failed', {
+                  attachmentId: attachment.id,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }
+          };
+
+          try {
+            const posted = await postOnce();
+            const threadRootTs = isParent ? posted.ts : threadTs!;
+            await uploadAttachments(threadRootTs);
+            return { messageTs: posted.ts, threadRootTs };
+          } catch (err) {
+            if (!isMissingChannelError(err)) throw err;
+            this.clearChannelBinding();
+            threadTs = null;
+            isParent = true;
+            const recovered = await this.ensureChannel(this.identityFromMeta());
+            channelId = recovered.channelId;
+            const posted = await postOnce();
+            await uploadAttachments(posted.ts);
+            return { messageTs: posted.ts, threadRootTs: posted.ts };
+          }
+        },
+      });
+
+      const existingBinding =
+        input.conversation.external ??
+        slackBindingFromLegacy({
+          channelId: input.channelId,
+          slackThreadTs: input.conversation.slackThreadTs,
         });
 
-      let posted: Awaited<ReturnType<typeof slack.postMessage>>;
-      try {
-        posted = await postOnce();
-      } catch (err) {
-        if (!isMissingChannelError(err)) throw err;
-        this.clearChannelBinding();
-        threadTs = null;
-        isParent = true;
-        const recovered = await this.ensureChannel(this.identityFromMeta());
-        channelId = recovered.channelId;
-        posted = await postOnce();
-      }
+      const result = await adapter.post({
+        identity,
+        conversation: input.conversation,
+        message: input.message,
+        binding: existingBinding,
+        inboxId: input.channelId,
+      });
 
-      const slackTs = posted.ts;
-      if (isParent) {
-        threadTs = posted.ts;
-        this.touchConversation(input.conversation.id, Date.now(), threadTs);
-      }
-      return { slackTs, threadTs: threadTs! };
+      this.bindConversation(input.conversation.id, result.binding);
+
+      return {
+        slackTs: result.messageRef.messageId,
+        threadTs: result.binding.locationId,
+      };
     }
 
     async fetch(request: Request): Promise<Response> {
@@ -779,11 +1006,18 @@ export function createCustomerSupportDOClass<Env extends object>(
         const [client, server] = Object.values(pair);
         this.ctx.acceptWebSocket(server);
         server.serializeAttachment({ customerKey, displayName, meta } satisfies WsAttachment);
-        return new Response(null, { status: 101, webSocket: client });
+        const headers = new Headers();
+        if (request.headers.get('Sec-WebSocket-Protocol') === 'cf-slack-support.v1') {
+          headers.set('Sec-WebSocket-Protocol', 'cf-slack-support.v1');
+        }
+        return new Response(null, { status: 101, webSocket: client, headers });
       }
 
       if (path === '/slack/event' && request.method === 'POST') {
         const event = (await request.json()) as { type?: string };
+        if (!(await this.isAuthorizedSlackActor(event as SlackActorEvent))) {
+          return Response.json({ ok: true, ignored: 'unauthorized_actor' });
+        }
         const host = this.host();
         for (const feature of features) {
           if (!feature.onSlackEvent) continue;
@@ -810,6 +1044,15 @@ export function createCustomerSupportDOClass<Env extends object>(
     }
 
     async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+      const byteLength =
+        typeof message === 'string'
+          ? new TextEncoder().encode(message).byteLength
+          : message.byteLength;
+      if (byteLength > CLIENT_FRAME_LIMITS.maxBytes) {
+        this.send(ws, { type: 'error', code: 'frame_too_large', message: 'Frame too large' });
+        ws.close(1009, 'Frame too large');
+        return;
+      }
       const raw = typeof message === 'string' ? message : new TextDecoder().decode(message);
       const frame = parseClientFrame(raw);
       if (!frame) {
@@ -988,9 +1231,13 @@ export function createCustomerSupportDOClass<Env extends object>(
           conversation,
           message,
         });
+        const external = slackMessageRef(slackTs);
+        const binding = slackBindingFromLegacy({ channelId, slackThreadTs: threadTs });
         message.slackTs = slackTs;
+        message.external = external;
         conversation = {
           ...conversation,
+          external: binding,
           slackThreadTs: threadTs,
           updatedAt: message.createdAt,
         };
@@ -1003,6 +1250,7 @@ export function createCustomerSupportDOClass<Env extends object>(
         if (titled) {
           conversation = {
             ...titled,
+            external: binding ?? titled.external,
             slackThreadTs: threadTs ?? conversation.slackThreadTs,
             updatedAt: stored.createdAt,
           };
@@ -1014,6 +1262,7 @@ export function createCustomerSupportDOClass<Env extends object>(
           message: stored,
           conversation,
           direction: 'to_slack',
+          adapterId: 'slack',
         });
 
         this.send(ws, { type: 'ack', clientId: frame.clientId, messageId: stored.id });
@@ -1054,11 +1303,18 @@ export function createCustomerSupportDOClass<Env extends object>(
       }
 
       const { threadRoot } = routing;
-      let conversation = this.getConversationByThread(threadRoot);
+      let conversation = this.getConversationByBinding({
+        adapterId: 'slack',
+        locationId: threadRoot,
+      });
       if (!conversation) {
         conversation = this.insertConversation({
           id: newId('conv'),
           title: null,
+          external: slackBindingFromLegacy({
+            channelId: event.channel,
+            slackThreadTs: threadRoot,
+          }),
           slackThreadTs: threadRoot,
           createdAt: Date.now(),
         });
@@ -1068,15 +1324,27 @@ export function createCustomerSupportDOClass<Env extends object>(
       const slack = createSlackClient({ botToken: runtime.slack.botToken });
       const attachments: SupportAttachment[] = [];
       if (runtime.media?.store) {
+        const maxImageBytes = runtime.media.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES;
         for (const file of event.files || []) {
           if (!file.url_private_download) continue;
           const allowed =
             runtime.media.allowedMimeTypes ?? [...DEFAULT_ALLOWED_MIME_TYPES];
           if (file.mimetype && !allowed.includes(file.mimetype)) continue;
+          if (file.size != null && file.size > maxImageBytes) continue;
           try {
-            const downloaded = await slack.downloadPrivateFile(file.url_private_download);
+            const downloaded = await slack.downloadPrivateFile(
+              file.url_private_download,
+              maxImageBytes,
+            );
+            if (!allowed.includes(downloaded.contentType)) continue;
+            if (
+              isSafeInlineImageMime(downloaded.contentType) &&
+              !hasExpectedImageSignature(downloaded.bytes, downloaded.contentType)
+            ) {
+              continue;
+            }
             const ext = extensionForMime(downloaded.contentType) || 'bin';
-            const key = `${customerKey}/${crypto.randomUUID()}.${ext}`;
+            const key = `${mediaNamespaceForCustomer(customerKey)}/${crypto.randomUUID()}.${ext}`;
             await runtime.media.store.put({
               key,
               body: downloaded.bytes,
@@ -1113,6 +1381,7 @@ export function createCustomerSupportDOClass<Env extends object>(
         authorRole: 'staff',
         authorName,
         createdAt: Date.now(),
+        external: slackMessageRef(event.ts),
         slackTs: event.ts,
       };
       const stored = this.insertMessage(message);
@@ -1131,6 +1400,7 @@ export function createCustomerSupportDOClass<Env extends object>(
         message: stored,
         conversation,
         direction: 'from_slack',
+        adapterId: 'slack',
       });
       this.broadcast({ type: 'message', message: stored });
     }

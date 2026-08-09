@@ -27,8 +27,24 @@ export {
   DEFAULT_ROUTES,
 } from './types';
 
+export type {
+  ChannelAdapterId,
+  ConversationExternalBinding,
+  MessageExternalRef,
+} from './external-binding';
+
+export {
+  resolveConversationExternal,
+  resolveMessageExternal,
+  slackBindingFromLegacy,
+  slackMessageRef,
+  slackThreadTsFromExternal,
+  slackTsFromExternal,
+} from './external-binding';
+
 export type { ClientFrame, ServerFrame, UploadResponse } from './frames';
 export {
+  CLIENT_FRAME_LIMITS,
   isClientFrameType,
   isServerFrameType,
   parseClientFrame,

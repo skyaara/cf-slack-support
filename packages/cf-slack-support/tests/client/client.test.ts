@@ -3,12 +3,16 @@ import { createSupportClient } from '../../src/client';
 
 class MockWebSocket {
   static OPEN = 1;
+  static instances: MockWebSocket[] = [];
   readyState = 0;
   url: string;
+  protocols: string[];
   private listeners = new Map<string, Set<(ev: { data?: string }) => void>>();
 
-  constructor(url: string) {
+  constructor(url: string, protocols: string[] = []) {
     this.url = url;
+    this.protocols = protocols;
+    MockWebSocket.instances.push(this);
     queueMicrotask(() => {
       this.readyState = MockWebSocket.OPEN;
       this.emit('open', {});
@@ -40,17 +44,20 @@ class MockWebSocket {
 
 describe('createSupportClient', () => {
   const OriginalWS = globalThis.WebSocket;
+  const OriginalFetch = globalThis.fetch;
 
   beforeEach(() => {
+    MockWebSocket.instances = [];
     // @ts-expect-error mock
     globalThis.WebSocket = MockWebSocket;
   });
 
   afterEach(() => {
     globalThis.WebSocket = OriginalWS;
+    globalThis.fetch = OriginalFetch;
   });
 
-  it('connects with token query and emits ready', async () => {
+  it('connects with token in a WebSocket subprotocol, not the URL', async () => {
     const client = createSupportClient({
       baseUrl: 'https://support.example.com/support-api',
       getToken: () => 'tok_abc',
@@ -83,6 +90,9 @@ describe('createSupportClient', () => {
     // so verify status machine and URL token instead by subclassing.
     expect(statuses).toContain('connecting');
     expect(statuses).toContain('open');
+    expect(MockWebSocket.instances[0]?.url).not.toContain('tok_abc');
+    expect(MockWebSocket.instances[0]?.protocols[0]).toBe('cf-slack-support.v1');
+    expect(MockWebSocket.instances[0]?.protocols[1]).toMatch(/^cf-slack-support\.auth\./);
     void ready;
     client.disconnect();
     expect(client.getStatus()).toBe('closed');
@@ -114,5 +124,20 @@ describe('createSupportClient', () => {
     expect((init as RequestInit).headers).toMatchObject({
       Authorization: 'Bearer secret',
     });
+  });
+
+  it('downloads protected attachments with bearer authentication', async () => {
+    const fetchMock = vi.fn(async () => new Response('image', { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const client = createSupportClient({
+      baseUrl: 'https://support.example.com',
+      getToken: () => 'secret',
+    });
+
+    await client.downloadAttachment('https://support.example.com/media/u1/a.png');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://support.example.com/media/u1/a.png',
+      expect.objectContaining({ headers: { Authorization: 'Bearer secret' } }),
+    );
   });
 });
